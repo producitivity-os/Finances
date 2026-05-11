@@ -1,18 +1,23 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from "react"
-import { addDays } from "date-fns"
+import {
+  useEffect, useRef, useState, type KeyboardEvent
+} from "react"
+import { endOfWeek, isWithinInterval, startOfMonth, startOfWeek } from "date-fns"
 import type { DateRange } from "react-day-picker"
 import { Bar, BarChart, CartesianGrid, Line, LineChart, XAxis } from "recharts"
+import { invoke } from "@tauri-apps/api/core"
 import {
   BankIcon,
   CalendarBlankIcon,
   CarIcon,
   ChartBarIcon,
   FunnelSimpleIcon,
+  MagnifyingGlassIcon,
   HouseIcon,
   PiggyBankIcon,
   ShoppingCartIcon,
   WalletIcon,
 } from "@phosphor-icons/react"
+import { CommandIcon, UploadSimpleIcon } from "@phosphor-icons/react"
 
 import { Button } from "@/components/ui/button"
 import {
@@ -41,6 +46,7 @@ import {
   ComboboxTrigger,
 } from "@/components/ui/combobox"
 import { Calendar, CalendarDayButton } from "@/components/ui/calendar"
+import { CalendarWithTotals } from "@/components/ui/calendar-with-totals"
 import {
   ChartContainer,
   ChartTooltip,
@@ -55,6 +61,22 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
+import { AppSidebar } from "@/components/app-sidebar"
+import { CookieConsentBanner } from "@/components/cookie-consent-banner"
+import {
+  Breadcrumb,
+  BreadcrumbItem,
+  BreadcrumbLink,
+  BreadcrumbList,
+  BreadcrumbPage,
+  BreadcrumbSeparator,
+} from "@/components/ui/breadcrumb"
+import { Separator } from "@/components/ui/separator"
+import {
+  SidebarInset,
+  SidebarProvider,
+  SidebarTrigger,
+} from "@/components/ui/sidebar"
 
 type RecordType = "Transfer" | "Deposit" | "Expense"
 
@@ -72,7 +94,7 @@ type AccountApi = {
   type: "individual" | "restaurant" | "other"
 }
 
-type Category = "Savings" | "Income" | "Groceries" | "Transportation"
+type Category = string
 
 type RecordItem = {
   id: string
@@ -98,6 +120,239 @@ type RecordApi = {
   detail: string
   description: string
   category: Category
+}
+
+type ImportLedgerPayload = {
+  accounts: {
+    id: string
+    display_name: string
+    account_name: string
+    type: "individual" | "restaurant" | "other"
+  }[]
+  records: {
+    id: string
+    date: string
+    account_from_id: string
+    payee_to_id: string
+    type: RecordType
+    amount: string
+    currency: string
+    detail: string
+    description: string
+    category: string
+  }[]
+}
+
+type UploadedLedgerRow = {
+  rowNumber: string
+  date: string
+  account: string
+  detail: string
+  payee: string
+  category: string
+  type: string
+  amount: string
+  balance: string
+  waived: string
+  note: string
+}
+
+const normalizeWhitespace = (value: string) =>
+  value.replace(/\s+/g, " ").replace(/\u000d/g, "").trim()
+
+const slugify = (value: string) =>
+  normalizeWhitespace(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "entry"
+
+const parseFlexibleDate = (value: string) => {
+  const normalized = normalizeWhitespace(value)
+  const shortMatch = normalized.match(/^(\d{1,2})-([A-Za-z]{3})-(\d{2})$/)
+  if (shortMatch) {
+    const [, day, mon, yy] = shortMatch
+    const months = ["jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"]
+    const monthIndex = months.indexOf(mon.toLowerCase())
+    if (monthIndex >= 0) {
+      return `20${yy}-${String(monthIndex + 1).padStart(2, "0")}-${day.padStart(2, "0")}`
+    }
+  }
+
+  const longMatch = normalized.match(/^(\d{1,2}) ([A-Za-z]{3}) (\d{4})$/)
+  if (longMatch) {
+    const [, day, mon, year] = longMatch
+    const months = ["jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"]
+    const monthIndex = months.indexOf(mon.toLowerCase())
+    if (monthIndex >= 0) {
+      return `${year}-${String(monthIndex + 1).padStart(2, "0")}-${day.padStart(2, "0")}`
+    }
+  }
+
+  return normalized
+}
+
+const parseLedgerAmount = (value: string) => {
+  const normalized = normalizeWhitespace(value)
+    .replace(/^MYR\s*/i, "")
+    .replace(/,/g, "")
+    .replace(/^\+/, "")
+  const sign = normalized.startsWith("-") ? -1 : 1
+  const numeric = normalized.replace(/^-/, "")
+  const parsed = Number.parseFloat(numeric)
+  return Number.isFinite(parsed) ? sign * parsed : 0
+}
+
+const parseCsvLine = (line: string) => {
+  const result: string[] = []
+  let current = ""
+  let inQuotes = false
+
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index]
+    const next = line[index + 1]
+
+    if (char === '"') {
+      if (inQuotes && next === '"') {
+        current += '"'
+        index += 1
+      } else {
+        inQuotes = !inQuotes
+      }
+      continue
+    }
+
+    if (char === "," && !inQuotes) {
+      result.push(current)
+      current = ""
+      continue
+    }
+
+    current += char
+  }
+
+  result.push(current)
+  return result.map((value) => value.trim())
+}
+
+const parseLedgerCsv = (text: string): UploadedLedgerRow[] => {
+  const lines = text
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .split("\n")
+    .filter((line) => line.trim().length > 0)
+
+  if (lines.length <= 1) return []
+
+  return lines.slice(1).map((line) => {
+    const [
+      rowNumber = "",
+      date = "",
+      account = "",
+      detail = "",
+      payee = "",
+      category = "",
+      type = "",
+      amount = "",
+      balance = "",
+      waived = "",
+      note = "",
+    ] = parseCsvLine(line)
+
+    return {
+      rowNumber,
+      date,
+      account,
+      detail,
+      payee,
+      category,
+      type,
+      amount,
+      balance,
+      waived,
+      note,
+    }
+  })
+}
+
+const inferPayee = (row: UploadedLedgerRow) => {
+  if (normalizeWhitespace(row.payee)) return normalizeWhitespace(row.payee)
+  const detail = normalizeWhitespace(row.detail)
+  if (!detail) return "Unknown Payee"
+  const stripped = detail.replace(/^\d+\s*/, "")
+  const [firstSegment] = stripped.split("*")
+  return normalizeWhitespace(firstSegment || stripped)
+}
+
+const inferRecordType = (row: UploadedLedgerRow, signedAmount: number): RecordType => {
+  const typeHint = normalizeWhitespace(row.type).toLowerCase()
+  const categoryHint = normalizeWhitespace(row.category).toLowerCase()
+  const detailHint = normalizeWhitespace(row.detail).toLowerCase()
+
+  if (typeHint.includes("transfer") || categoryHint === "transfer" || detailHint.includes("fund transfer")) {
+    return "Transfer"
+  }
+  if (signedAmount >= 0) return "Deposit"
+  return "Expense"
+}
+
+const inferCategory = (row: UploadedLedgerRow, recordType: RecordType) => {
+  const explicit = normalizeWhitespace(row.category)
+  if (explicit) return explicit
+  if (recordType === "Transfer") return "Transfer"
+  if (recordType === "Deposit") return "Income"
+  return "Uncategorized"
+}
+
+const buildImportPayload = (rows: UploadedLedgerRow[]): ImportLedgerPayload => {
+  const accounts = new Map<
+    string,
+    { id: string; display_name: string; account_name: string; type: "individual" | "restaurant" | "other" }
+  >()
+
+  const ensureAccount = (label: string) => {
+    const name = normalizeWhitespace(label) || "Unknown Account"
+    const key = slugify(name)
+    if (!accounts.has(key)) {
+      accounts.set(key, {
+        id: `acc-${key}`,
+        display_name: name,
+        account_name: name,
+        type: "other",
+      })
+    }
+    return accounts.get(key)!
+  }
+
+  const records = rows
+    .filter((row) => normalizeWhitespace(row.date) && normalizeWhitespace(row.amount))
+    .map((row, index) => {
+      const accountFrom = ensureAccount(row.account)
+      const payeeTo = ensureAccount(inferPayee(row))
+      const signedAmount = parseLedgerAmount(row.amount)
+      const recordType = inferRecordType(row, signedAmount)
+      const category = inferCategory(row, recordType)
+      const note = normalizeWhitespace(row.note)
+      const waived = normalizeWhitespace(row.waived)
+      const description = [waived, note].filter(Boolean).join(" | ")
+
+      return {
+        id: `import-${String(index + 1).padStart(4, "0")}`,
+        date: parseFlexibleDate(row.date),
+        account_from_id: accountFrom.id,
+        payee_to_id: payeeTo.id,
+        type: recordType,
+        amount: Math.abs(signedAmount).toFixed(2),
+        currency: "MYR",
+        detail: normalizeWhitespace(row.detail),
+        description,
+        category,
+      }
+    })
+
+  return {
+    accounts: Array.from(accounts.values()),
+    records,
+  }
 }
 
 const initialAccounts: Account[] = [
@@ -126,6 +381,13 @@ const categoryIcons = {
   Income: WalletIcon,
   Groceries: ShoppingCartIcon,
   Transportation: CarIcon,
+  Food: ShoppingCartIcon,
+  Shopping: ShoppingCartIcon,
+  Salary: WalletIcon,
+  Transfer: WalletIcon,
+  Loan: WalletIcon,
+  Petrol: CarIcon,
+  "Car Fuel": CarIcon,
 } as const
 
 const initialRecords: RecordItem[] = []
@@ -155,6 +417,10 @@ const defaultNewRow = (accounts: Account[]): NewRowForm => ({
 })
 
 export function App() {
+  const [currentRoute, setCurrentRoute] = useState(() =>
+    window.location.hash || "#/transactions"
+  )
+  const [commandOpen, setCommandOpen] = useState(false)
   const [accounts, setAccounts] = useState<Account[]>(initialAccounts)
   const [records, setRecords] = useState<RecordItem[]>(initialRecords)
   const [selectedRowId, setSelectedRowId] = useState<string | null>(null)
@@ -167,8 +433,6 @@ export function App() {
   const [spendingView, setSpendingView] = useState<
     "yearly" | "monthly" | "weekly" | "daily"
   >("monthly")
-  const [selectedSpendingCategory, setSelectedSpendingCategory] =
-    useState<Category>("Groceries")
   const [filters, setFilters] = useState({
     query: "",
     type: "",
@@ -188,12 +452,13 @@ export function App() {
     new: "",
   })
   const [calendarRange, setCalendarRange] = useState<DateRange | undefined>({
-    from: addDays(new Date(), -14),
+    from: startOfMonth(new Date()),
     to: new Date(),
   })
   const [newRow, setNewRow] = useState<NewRowForm>(() =>
     defaultNewRow(initialAccounts)
   )
+  const csvInputRef = useRef<HTMLInputElement | null>(null)
 
   const mapAccountFromApi = (row: AccountApi): Account => ({
     id: row.id,
@@ -202,12 +467,10 @@ export function App() {
     type: row.type,
   })
 
-  useEffect(() => {
-    const loadAccounts = async () => {
-      const response = await fetch("/api/accounts")
-      if (!response.ok) return
-      const data = (await response.json()) as AccountApi[]
-      if (data.length === 0) return
+  const loadAccounts = async () => {
+    try {
+      const data = await invoke<AccountApi[]>("list_accounts")
+      if (data.length === 0) return []
       const mapped = data.map(mapAccountFromApi)
       setAccounts(mapped)
       setNewRow((current) => ({
@@ -215,8 +478,27 @@ export function App() {
         accountFromId: current.accountFromId || mapped[0]?.id || "",
         payeeToId: current.payeeToId || mapped[1]?.id || mapped[0]?.id || "",
       }))
+      return mapped
+    } catch {
+      return []
+    }
+  }
+
+  useEffect(() => {
+    const syncRoute = () => {
+      if (!window.location.hash) {
+        window.location.hash = "/transactions"
+        return
+      }
+      setCurrentRoute(window.location.hash)
     }
 
+    syncRoute()
+    window.addEventListener("hashchange", syncRoute)
+    return () => window.removeEventListener("hashchange", syncRoute)
+  }, [])
+
+  useEffect(() => {
     void loadAccounts()
   }, [])
 
@@ -225,6 +507,17 @@ export function App() {
       if (event.metaKey && event.key.toLowerCase() === "e") {
         event.preventDefault()
         setSpreadsheetMode((current) => !current)
+        return
+      }
+
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "p") {
+        event.preventDefault()
+        setCommandOpen((current) => !current)
+        return
+      }
+
+      if (event.key === "Escape") {
+        setCommandOpen(false)
       }
     }
     window.addEventListener("keydown", onKeyDown)
@@ -249,18 +542,43 @@ export function App() {
     }
   }
 
-  useEffect(() => {
-    const loadRecords = async () => {
-      const response = await fetch("/api/records")
-      if (!response.ok) return
-      const rows = (await response.json()) as RecordApi[]
+  const loadRecords = async (accountList: Account[]) => {
+    try {
+      const rows = await invoke<RecordApi[]>("list_records")
       const mapped = rows
-        .map((row) => mapRecordFromApi(row, accounts))
+        .map((row) => mapRecordFromApi(row, accountList))
         .filter((row): row is RecordItem => row !== null)
       setRecords(mapped)
+      return mapped
+    } catch {
+      return []
     }
-    void loadRecords()
+  }
+
+  useEffect(() => {
+    void loadRecords(accounts)
   }, [accounts])
+
+  const handleUploadCsv = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+
+    try {
+      const text = await file.text()
+      const rows = parseLedgerCsv(text)
+      const payload = buildImportPayload(rows)
+      await invoke("import_ledger", { payload })
+      const nextAccounts = await loadAccounts()
+      await loadRecords(nextAccounts.length > 0 ? nextAccounts : accounts)
+      setSelectedRowId(null)
+      setCommandOpen(false)
+      toast.success(`Imported ${payload.records.length} records from CSV`)
+    } catch {
+      toast.error("Failed to import CSV")
+    } finally {
+      event.target.value = ""
+    }
+  }
 
   const startEdit = (record: RecordItem) => {
     setEditingId(record.id)
@@ -276,10 +594,9 @@ export function App() {
     if (!draft) return
     const normalizedDraft = { ...draft, amount: formatAmountFixed(draft.amount) }
     try {
-      const response = await fetch(`/api/records/${normalizedDraft.id}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      await invoke<RecordApi>("update_record", {
+        payload: {
+          id: normalizedDraft.id,
           date: normalizedDraft.date,
           account_from_id: normalizedDraft.accountFrom.id,
           payee_to_id: normalizedDraft.payeeTo.id,
@@ -289,12 +606,8 @@ export function App() {
           detail: normalizedDraft.detail,
           description: normalizedDraft.description,
           category: normalizedDraft.category,
-        }),
+        },
       })
-      if (!response.ok) {
-        toast.error("Failed to update row")
-        return
-      }
     } catch {
       toast.error("Failed to update row")
       return
@@ -419,12 +732,6 @@ export function App() {
     const target = new Date(value.getFullYear(), value.getMonth(), value.getDate())
     return target >= from && target <= to
   }
-
-  const dailyNet = records.reduce<Record<string, number>>((acc, record) => {
-    const signed = signedAmount(record)
-    acc[record.date] = (acc[record.date] ?? 0) + signed
-    return acc
-  }, {})
 
   const filteredRecords = recordsWithBalance.filter((record) => {
     const query = filters.query.trim().toLowerCase()
@@ -561,11 +868,9 @@ export function App() {
     const dt = new Date(new Date().getFullYear(), new Date().getMonth() - (5 - index), 1)
     const month = dt.getMonth()
     const year = dt.getFullYear()
-    const value = records
+    const value = filteredRecords
       .filter(
         (record) =>
-          record.type === "Expense" &&
-          record.category === selectedSpendingCategory &&
           (() => {
             const d = parseDateValue(record.date)
             return d ? d.getMonth() === month && d.getFullYear() === year : false
@@ -579,10 +884,25 @@ export function App() {
   })
   const lineChartConfig = {
     amount: {
-      label: `${selectedSpendingCategory} Spending`,
+      label: "Filtered Total",
       color: "oklch(0.55 0 0)",
     },
   } satisfies ChartConfig
+
+  const getWeekTotal = (weekDates: Date[]) =>
+    filteredRecords
+      .filter((record) => {
+        if (record.type !== "Expense") return false
+        const d = parseDateValue(record.date)
+        if (!d) return false
+        return weekDates.some(
+          (wd) =>
+            wd.getFullYear() === d.getFullYear() &&
+            wd.getMonth() === d.getMonth() &&
+            wd.getDate() === d.getDate()
+        )
+      })
+      .reduce((sum, record) => sum + Math.abs(parseAmount(record.amount)), 0)
 
   const currencyToSymbol = (currency: string) => {
     const key = currency.trim().toUpperCase()
@@ -626,10 +946,8 @@ export function App() {
     const nextCount = records.length + 1
     let created: RecordItem | null = null
     try {
-      const response = await fetch("/api/records", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      const createdApi = await invoke<RecordApi>("create_record", {
+        payload: {
           id: nextRecord.id,
           date: nextRecord.date,
           account_from_id: nextRecord.accountFrom.id,
@@ -640,13 +958,9 @@ export function App() {
           detail: nextRecord.detail,
           description: nextRecord.description,
           category: nextRecord.category,
-        }),
+        },
       })
-      if (!response.ok) {
-        toast.error("Failed to save row")
-        return
-      }
-      created = mapRecordFromApi((await response.json()) as RecordApi, accounts)
+      created = mapRecordFromApi(createdApi, accounts)
     } catch {
       toast.error("Failed to save row")
       return
@@ -759,20 +1073,21 @@ export function App() {
       accountName: `${base} Account`,
       type: "other",
     }
-    const response = await fetch("/api/accounts", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        id: next.id,
-        display_name: next.displayName,
-        account_name: next.accountName,
-        type: next.type,
-      }),
-    })
-    if (!response.ok) return null
-    const created = mapAccountFromApi((await response.json()) as AccountApi)
-    setAccounts((current) => [...current, created])
-    return created
+    try {
+      const createdApi = await invoke<AccountApi>("create_account", {
+        payload: {
+          id: next.id,
+          display_name: next.displayName,
+          account_name: next.accountName,
+          type: next.type,
+        },
+      })
+      const created = mapAccountFromApi(createdApi)
+      setAccounts((current) => [...current, created])
+      return created
+    } catch {
+      return null
+    }
   }
 
   const AccountCombobox = ({
@@ -898,6 +1213,18 @@ export function App() {
     )
   }
 
+  const categoryOptions = Array.from(
+    new Set([
+      "Savings",
+      "Income",
+      "Groceries",
+      "Transportation",
+      ...records.map((record) => record.category).filter(Boolean),
+      newRow.category,
+      draft?.category ?? "",
+    ])
+  ).filter(Boolean)
+
   const CategoryCombobox = ({
     value,
     onChange,
@@ -912,19 +1239,13 @@ export function App() {
     setQuery: (value: string) => void
   }) => {
     const selected = value
-    const categories: Category[] = [
-      "Savings",
-      "Income",
-      "Groceries",
-      "Transportation",
-    ]
-    const filtered = categories.filter((item) =>
+    const filtered = categoryOptions.filter((item) =>
       item.toLowerCase().includes(query.trim().toLowerCase())
     )
 
     return (
       <Combobox
-        items={categories}
+        items={categoryOptions}
         itemToStringLabel={(item) => item}
         itemToStringValue={(item) => item}
         inputValue={query}
@@ -944,7 +1265,7 @@ export function App() {
         <ComboboxContent>
           <ComboboxList>
             {filtered.map((item) => {
-              const Icon = categoryIcons[item]
+              const Icon = categoryIcons[item as keyof typeof categoryIcons] ?? PiggyBankIcon
               return (
                 <ComboboxItem key={item} value={item}>
                   <Icon className="size-3.5" />
@@ -1082,177 +1403,209 @@ export function App() {
     )
   }
 
+  const breadcrumbLabel =
+    currentRoute === "#/accounts"
+      ? "Accounts"
+      : currentRoute === "#/settings"
+        ? "Settings"
+        : "Transactions"
+  const isTransactionsRoute = currentRoute === "#/transactions"
+  const isAccountsRoute = currentRoute === "#/accounts"
+  const isSettingsRoute = currentRoute === "#/settings"
+  const lastLoggedDate =
+    records.length > 0
+      ? [...records]
+          .map((record) => record.date)
+          .sort((left, right) => right.localeCompare(left))[0]
+      : null
+
   return (
-    <div className="min-h-svh bg-muted/50 pt-4 md:pt-6">
-      <div className="w-full md:mx-auto md:max-w-7xl md:px-6">
-        <div className="grid w-full gap-4 md:grid-cols-12">
-        <div className="overflow-hidden border-y bg-card p-4 md:order-2 md:col-span-4 md:border">
-            <div className="mb-2 flex items-center justify-between">
-              <h2 className="text-lg font-semibold leading-none tracking-tight">
-                Spending Overview
-              </h2>
-              <ChartBarIcon className="size-4 text-muted-foreground" />
+    <SidebarProvider>
+      <AppSidebar />
+      <SidebarInset className="h-svh overflow-hidden">
+        <input
+          ref={csvInputRef}
+          type="file"
+          accept=".csv,text/csv"
+          className="hidden"
+          onChange={handleUploadCsv}
+        />
+        <header className="fixed inset-x-0 top-0 z-[80] flex h-8 items-center border-b border-border bg-background/95 backdrop-blur-sm">
+          <div className="flex w-full items-center gap-1.5 pl-4 pr-4 text-xs">
+            <SidebarTrigger className="-ml-1 h-6 w-6" />
+            <Separator
+              orientation="vertical"
+              className="mx-1 my-auto data-[orientation=vertical]:h-3"
+            />
+            <Breadcrumb>
+              <BreadcrumbList>
+                <BreadcrumbItem className="hidden md:block">
+                  <BreadcrumbLink href="#/transactions">Finances</BreadcrumbLink>
+                </BreadcrumbItem>
+                <BreadcrumbSeparator className="hidden md:block" />
+                <BreadcrumbItem>
+                  <BreadcrumbPage>{breadcrumbLabel}</BreadcrumbPage>
+                </BreadcrumbItem>
+              </BreadcrumbList>
+            </Breadcrumb>
+          </div>
+        </header>
+        {commandOpen ? (
+          <div className="fixed inset-0 z-[95] flex items-start justify-center bg-black/10 pt-24">
+            <button
+              type="button"
+              className="absolute inset-0"
+              aria-label="Close command palette"
+              onClick={() => setCommandOpen(false)}
+            />
+            <div className="relative z-10 w-full max-w-xl border bg-background shadow-2xl">
+              <div className="flex items-center gap-2 border-b px-4 py-3">
+                <CommandIcon className="size-4 text-muted-foreground" />
+                <span className="text-xs uppercase tracking-wide text-muted-foreground">
+                  Command
+                </span>
+              </div>
+              <button
+                type="button"
+                className="flex w-full items-center gap-3 px-4 py-4 text-left text-sm hover:bg-muted"
+                onClick={() => {
+                  setCommandOpen(false)
+                  csvInputRef.current?.click()
+                }}
+              >
+                <UploadSimpleIcon className="size-4" />
+                <span>Upload CSV</span>
+                <span className="ml-auto text-[10px] uppercase tracking-wide text-muted-foreground">
+                  Import ledger
+                </span>
+              </button>
             </div>
-            <div className="mt-4 mb-3 grid grid-cols-4 border">
-              {(["yearly", "monthly", "weekly", "daily"] as const).map((tab) => (
-                <button
-                  key={tab}
-                  type="button"
-                  onClick={() => setSpendingView(tab)}
-                  className={`h-7 border-r text-[10px] uppercase tracking-wide last:border-r-0 ${
-                    spendingView === tab ? "bg-foreground text-background" : "bg-card"
-                  }`}
-                >
-                  {tab}
-                </button>
-              ))}
+          </div>
+        ) : null}
+        <div className="no-scrollbar flex-1 overflow-y-auto bg-muted pt-8">
+      {isAccountsRoute ? (
+      <div className="w-full pb-20 pt-4 md:mx-auto md:max-w-7xl md:px-2 md:pt-6">
+        <div className="grid gap-4 px-3 md:px-0">
+          <div className="border-y bg-card p-4 md:border">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h1 className="text-lg font-semibold tracking-tight">Accounts</h1>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Manage the accounts and counterparties used in your transactions.
+                </p>
+              </div>
+              <div className="text-right text-xs text-muted-foreground">
+                <div>Total accounts</div>
+                <div className="mt-1 text-lg font-semibold text-foreground">
+                  {accounts.length}
+                </div>
+              </div>
             </div>
-            <ChartContainer config={spendingChartConfig} className="h-44 w-full border p-2">
-              <BarChart data={spendingData} margin={{ top: 8, right: 8, left: 8, bottom: 0 }}>
-                <CartesianGrid vertical={false} strokeDasharray="3 3" />
-                <XAxis
-                  dataKey="period"
-                  tickLine={false}
-                  axisLine={false}
-                  tickMargin={6}
-                />
-                <ChartTooltip
-                  content={
-                    <ChartTooltipContent
-                      formatter={(value) => (
-                        <span>{`Spending ${Number(value).toLocaleString()}`}</span>
-                      )}
-                    />
-                  }
-                />
-                <Bar dataKey="value" fill="var(--color-value)" radius={0} />
-              </BarChart>
-            </ChartContainer>
+          </div>
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+            {accounts.map((account) => (
+              <div key={account.id} className="border-y bg-card p-4 md:border">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <h2 className="text-sm font-semibold">{account.displayName}</h2>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {account.accountName}
+                    </p>
+                  </div>
+                  <span className="border px-2 py-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+                    {account.type}
+                  </span>
+                </div>
+                <dl className="mt-4 grid gap-2 text-xs">
+                  <div className="flex items-center justify-between gap-3 border-t pt-2">
+                    <dt className="text-muted-foreground">Account ID</dt>
+                    <dd className="font-mono text-[10px] text-foreground">{account.id}</dd>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <dt className="text-muted-foreground">Used in records</dt>
+                    <dd className="text-foreground">
+                      {
+                        records.filter(
+                          (record) =>
+                            record.accountFrom.id === account.id ||
+                            record.payeeTo.id === account.id
+                        ).length
+                      }
+                    </dd>
+                  </div>
+                </dl>
+              </div>
+            ))}
+          </div>
         </div>
-        <div className="border-y bg-card p-4 md:order-3 md:col-span-4 md:border">
-          <div className="mb-4">
-            <h2 className="text-lg font-semibold leading-none tracking-tight">Spending</h2>
+      </div>
+      ) : isSettingsRoute ? (
+      <div className="w-full pb-20 pt-4 md:mx-auto md:max-w-5xl md:px-2 md:pt-6">
+        <div className="grid gap-4 px-3 md:px-0">
+          <div className="border-y bg-card p-4 md:border">
+            <h1 className="text-lg font-semibold tracking-tight">Settings</h1>
             <p className="mt-1 text-xs text-muted-foreground">
-              6-month category history.
+              Application-level preferences and workflow defaults.
             </p>
           </div>
-          <div className="mb-4">
-            <p className="mb-2 text-xs">Category</p>
-            <Combobox
-              items={["Savings", "Income", "Groceries", "Transportation"]}
-              itemToStringLabel={(item) => item}
-              itemToStringValue={(item) => item}
-              value={selectedSpendingCategory}
-              onValueChange={(item) => {
-                if (item) setSelectedSpendingCategory(item as Category)
+          <div className="grid gap-4 md:grid-cols-2">
+            <div className="border-y bg-card p-4 md:border">
+              <h2 className="text-sm font-semibold">Editing Mode</h2>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Spreadsheet mode lets you edit cells inline with keyboard navigation.
+              </p>
+              <div className="mt-4 flex items-center justify-between border-t pt-3 text-xs">
+                <span className="text-muted-foreground">Spreadsheet mode</span>
+                <Button
+                  variant={spreadsheetMode ? "default" : "outline"}
+                  size="sm"
+                  className="h-7 rounded-none px-2 text-xs"
+                  onClick={() => setSpreadsheetMode((current) => !current)}
+                >
+                  {spreadsheetMode ? "Enabled" : "Disabled"}
+                </Button>
+              </div>
+            </div>
+            <div className="border-y bg-card p-4 md:border">
+              <h2 className="text-sm font-semibold">Data Window</h2>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Current filters are applied to the transactions page only.
+              </p>
+              <dl className="mt-4 grid gap-2 border-t pt-3 text-xs">
+                <div className="flex items-center justify-between gap-3">
+                  <dt className="text-muted-foreground">Rows per page</dt>
+                  <dd>{pageSize}</dd>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <dt className="text-muted-foreground">Selected range</dt>
+                  <dd>
+                    {calendarRange?.from ? formatDateValue(calendarRange.from) : "-"} to{" "}
+                    {calendarRange?.to ? formatDateValue(calendarRange.to) : "-"}
+                  </dd>
+                </div>
+              </dl>
+            </div>
+          </div>
+        </div>
+      </div>
+      ) : (
+      <div className="w-full pb-20 pt-4 md:mx-auto md:max-w-7xl md:px-2 md:pt-6">
+        <div className="mb-3 flex items-center justify-start gap-2 px-3 md:px-0">
+          <div className="relative w-full max-w-sm">
+            <MagnifyingGlassIcon className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              placeholder="Search records..."
+              value={filters.query}
+              onChange={(event) => {
+                setFilters((current) => ({ ...current, query: event.target.value }))
+                setPage(1)
               }}
-            >
-              <ComboboxTrigger
-                render={
-                  <Button
-                    variant="outline"
-                    className="h-8 w-full justify-between rounded-none px-3 text-sm font-normal"
-                  />
-                }
-              >
-                {selectedSpendingCategory}
-              </ComboboxTrigger>
-              <ComboboxContent>
-                <ComboboxList>
-                  {(["Savings", "Income", "Groceries", "Transportation"] as const).map(
-                    (category) => (
-                    <ComboboxItem key={category} value={category}>
-                      {category}
-                    </ComboboxItem>
-                    )
-                  )}
-                </ComboboxList>
-              </ComboboxContent>
-            </Combobox>
+              className="h-8 rounded-none bg-white pr-14 pl-7 text-xs"
+            />
+            <span className="pointer-events-none absolute top-1/2 right-2 -translate-y-1/2 text-[10px] text-muted-foreground">
+              {filteredRecords.length}
+            </span>
           </div>
-          <div className="border-t pt-4">
-            <ChartContainer config={lineChartConfig} className="h-44 w-full">
-              <LineChart data={lineData} margin={{ top: 8, right: 8, left: 8, bottom: 0 }}>
-                <CartesianGrid vertical={false} strokeDasharray="3 3" />
-                <XAxis dataKey="period" tickLine={false} axisLine={false} />
-                <ChartTooltip content={<ChartTooltipContent />} />
-                <Line
-                  type="monotone"
-                  dataKey="amount"
-                  stroke="var(--color-amount)"
-                  strokeWidth={2}
-                  dot={false}
-                  fill="var(--color-amount)"
-                  fillOpacity={0.1}
-                />
-              </LineChart>
-            </ChartContainer>
-          </div>
-        </div>
-        <div className="overflow-hidden border-y bg-card p-4 md:order-1 md:col-span-3 md:border">
-          <div className="mb-2 flex items-center justify-between">
-            <h2 className="text-lg font-semibold leading-none tracking-tight">
-              Net Activity Calendar
-            </h2>
-            <CalendarBlankIcon className="size-4 text-muted-foreground" />
-          </div>
-          <div className="pt-3">
-          <Calendar
-            mode="range"
-            defaultMonth={calendarRange?.from}
-            selected={calendarRange}
-            onSelect={setCalendarRange}
-            showWeekNumber
-            numberOfMonths={1}
-            captionLayout="dropdown"
-            className="w-full"
-            classNames={{
-              root: "w-full",
-              month: "w-full",
-            }}
-            formatters={{
-              formatMonthDropdown: (date) =>
-                date.toLocaleString("default", { month: "long" }),
-            }}
-            components={{
-              DayButton: ({ children, modifiers, day, ...props }) => {
-                const key = formatDateValue(day.date)
-                const net = dailyNet[key] ?? 0
-                const text =
-                  net === 0
-                    ? ""
-                    : `${net > 0 ? "+" : "-"}${Math.abs(net).toFixed(0)} MYR`
-                return (
-                  <CalendarDayButton day={day} modifiers={modifiers} {...props}>
-                    {children}
-                    {!modifiers.outside && net !== 0 && (
-                      <span
-                        className={
-                          net < 0
-                            ? "text-red-700 dark:text-red-400"
-                            : net > 0
-                              ? "text-green-700 dark:text-green-400"
-                              : "text-foreground/80"
-                        }
-                      >
-                        {text}
-                      </span>
-                    )}
-                  </CalendarDayButton>
-                )
-              },
-            }}
-          />
-          </div>
-        </div>
-        </div>
-        <div
-          className={`mt-4 bg-card py-4 md:px-6 ${
-            spreadsheetMode ? "" : "border-y md:border"
-          }`}
-        >
-        <div className="mb-3 flex items-center justify-between px-3 md:px-0">
-          <h1 className="text-sm font-semibold tracking-tight">Records</h1>
           <Popover>
             <PopoverTrigger asChild>
               <Button variant="outline" size="sm" className="h-8 rounded-none text-xs">
@@ -1322,6 +1675,131 @@ export function App() {
             </PopoverContent>
           </Popover>
         </div>
+        <div className="flex w-full flex-col gap-4 lg:grid lg:grid-cols-3">
+        <div className="hidden overflow-hidden border-y bg-card p-4 lg:block lg:border">
+            <div className="mb-2 flex items-center justify-between">
+              <h2 className="text-lg font-semibold leading-none tracking-tight">
+                Spending Overview
+              </h2>
+              <ChartBarIcon className="size-4 text-muted-foreground" />
+            </div>
+            <div className="mt-4 mb-3 grid grid-cols-4 border">
+              {(["yearly", "monthly", "weekly", "daily"] as const).map((tab) => (
+                <button
+                  key={tab}
+                  type="button"
+                  onClick={() => setSpendingView(tab)}
+                  className={`h-7 border-r text-[10px] uppercase tracking-wide last:border-r-0 ${
+                    spendingView === tab ? "bg-foreground text-background" : "bg-card"
+                  }`}
+                >
+                  {tab}
+                </button>
+              ))}
+            </div>
+            <ChartContainer config={spendingChartConfig} className="h-44 w-full border p-2">
+              <BarChart data={spendingData} margin={{ top: 8, right: 8, left: 8, bottom: 0 }}>
+                <CartesianGrid vertical={false} strokeDasharray="3 3" />
+                <XAxis
+                  dataKey="period"
+                  tickLine={false}
+                  axisLine={false}
+                  tickMargin={6}
+                />
+                <ChartTooltip
+                  content={
+                    <ChartTooltipContent
+                      formatter={(value) => (
+                        <span>{`Spending ${Number(value).toLocaleString()}`}</span>
+                      )}
+                    />
+                  }
+                />
+                <Bar dataKey="value" fill="var(--color-value)" radius={0} />
+              </BarChart>
+            </ChartContainer>
+        </div>
+        <div className="w-full border-y bg-card p-4 md:col-span-1 md:border">
+          <div className="mb-4">
+            <h2 className="text-lg font-semibold leading-none tracking-tight">Spending</h2>
+            <p className="mt-1 text-xs text-muted-foreground">
+              6-month category history.
+            </p>
+          </div>
+          <div className="border-t pt-4">
+            <ChartContainer config={lineChartConfig} className="h-44 w-full">
+              <LineChart data={lineData} margin={{ top: 8, right: 8, left: 8, bottom: 0 }}>
+                <CartesianGrid vertical={false} strokeDasharray="3 3" />
+                <XAxis dataKey="period" tickLine={false} axisLine={false} />
+                <ChartTooltip
+                  content={
+                    <ChartTooltipContent
+                      formatter={(value, name) => (
+                        <span>{`${name} ${Number(value).toLocaleString()}`}</span>
+                      )}
+                    />
+                  }
+                />
+                <Line
+                  type="monotone"
+                  dataKey="amount"
+                  stroke="var(--color-amount)"
+                  strokeWidth={2}
+                  dot={false}
+                  fill="var(--color-amount)"
+                  fillOpacity={0.1}
+                />
+              </LineChart>
+            </ChartContainer>
+          </div>
+        </div>
+        <div className="w-full overflow-hidden border-y bg-card p-4 md:col-span-1 md:border">
+          <div className="flex justify-center">
+          <CalendarWithTotals
+            mode="range"
+            defaultMonth={calendarRange?.from}
+            selected={calendarRange}
+            onSelect={setCalendarRange}
+            modifiers={{
+              currentWeek: (date) =>
+                isWithinInterval(date, {
+                  start: startOfWeek(new Date()),
+                  end: endOfWeek(new Date()),
+                }),
+            }}
+            modifiersClassNames={{
+              currentWeek: "bg-violet-100/70 text-violet-900",
+            }}
+            showWeekNumber
+            numberOfMonths={1}
+            captionLayout="dropdown"
+            getWeekTotal={getWeekTotal}
+            formatters={{
+              formatMonthDropdown: (date) =>
+                date.toLocaleString("default", { month: "long" }),
+            }}
+            components={{
+              WeekNumber: ({ children, ...props }: any) => {
+                return (
+                  <td {...props}>
+                    <div className="flex size-(--cell-size) items-center justify-center">
+                      <span className="text-[12px] font-semibold tabular-nums text-foreground">
+                        {`W${children}`}
+                      </span>
+                    </div>
+                  </td>
+                )
+              },
+            }}
+          />
+          </div>
+        </div>
+        </div>
+        <div
+          className={`mt-4 bg-card py-4 md:px-6 ${
+            spreadsheetMode ? "" : "border-y md:border"
+          }`}
+        >
         <Table
           className={`text-[10px] ${
             spreadsheetMode
@@ -1382,7 +1860,7 @@ export function App() {
                     onClick={() => setSelectedRowId(record.id)}
                     onDoubleClick={() => startEdit(record)}
                   >
-                <TableCell className="sticky-date-cell bg-card group-hover:bg-muted/50 group-data-[state=selected]:bg-muted md:sticky md:left-0 md:z-20">
+                <TableCell className="sticky-date-cell bg-card group-data-[state=selected]:bg-muted md:sticky md:left-0 md:z-20">
                   {spreadsheetMode ? (
                     <Input
                       ref={registerCellRef(rowIndex, 0)}
@@ -1487,7 +1965,7 @@ export function App() {
                   <TableCell className="hidden md:table-cell">{record.type}</TableCell>
                 )}
                 {spreadsheetMode ? (
-                  <TableCell className="hidden bg-card text-right group-hover:bg-muted/50 group-data-[state=selected]:bg-muted md:table-cell">
+                  <TableCell className="hidden bg-card text-right group-data-[state=selected]:bg-muted md:table-cell">
                     <Input
                       ref={registerCellRef(rowIndex, 4)}
                       type="text"
@@ -1505,7 +1983,7 @@ export function App() {
                     />
                   </TableCell>
                 ) : editingId === record.id && draft ? (
-                  <TableCell className="hidden bg-card text-right group-hover:bg-muted/50 group-data-[state=selected]:bg-muted md:table-cell">
+                  <TableCell className="hidden bg-card text-right group-data-[state=selected]:bg-muted md:table-cell">
                     <Input
                       type="number"
                       step="0.01"
@@ -1572,7 +2050,9 @@ export function App() {
                     />
                   ) : (
                     (() => {
-                      const Icon = categoryIcons[record.category]
+                      const Icon =
+                        categoryIcons[record.category as keyof typeof categoryIcons] ??
+                        PiggyBankIcon
                       return (
                         <span className="inline-flex items-center gap-1.5" title={record.category}>
                           <Icon className="size-3.5" />
@@ -1582,7 +2062,7 @@ export function App() {
                     })()
                   )}
                 </TableCell>
-                <TableCell className="bg-card text-right group-hover:bg-muted/50 group-data-[state=selected]:bg-muted">
+                <TableCell className="bg-card text-right group-data-[state=selected]:bg-muted">
                   <Input
                     value={formatMoney(record.runningBalance)}
                     disabled
@@ -1611,7 +2091,7 @@ export function App() {
                 const newRowIndex = paginatedRecords.length
                 return (
                   <>
-              <TableCell className="sticky-date-cell bg-card group-hover:bg-muted/50 group-data-[state=selected]:bg-muted md:sticky md:left-0 md:z-20">
+              <TableCell className="sticky-date-cell bg-card group-data-[state=selected]:bg-muted md:sticky md:left-0 md:z-20">
                 {spreadsheetMode ? (
                   <Input
                     ref={registerCellRef(newRowIndex, 0)}
@@ -1720,7 +2200,7 @@ export function App() {
                   />
                 )}
               </TableCell>
-              <TableCell className="hidden bg-card text-right group-hover:bg-muted/50 group-data-[state=selected]:bg-muted md:table-cell">
+              <TableCell className="hidden bg-card text-right group-data-[state=selected]:bg-muted md:table-cell">
                 <Input
                   ref={spreadsheetMode ? registerCellRef(newRowIndex, 4) : undefined}
                   type={spreadsheetMode ? "text" : "number"}
@@ -1796,7 +2276,7 @@ export function App() {
                   />
                 )}
               </TableCell>
-              <TableCell className="bg-card text-right group-hover:bg-muted/50 group-data-[state=selected]:bg-muted">
+              <TableCell className="bg-card text-right group-data-[state=selected]:bg-muted">
                 -
               </TableCell>
                   </>
@@ -1806,7 +2286,9 @@ export function App() {
             ) : null}
           </TableBody>
         </Table>
-        <div className="mt-3 flex items-center justify-between px-3 text-xs md:px-0">
+        </div>
+        <div className="mt-4 border-y bg-card px-3 py-4 text-xs md:border md:px-6">
+        <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <span className="text-muted-foreground">Rows per page</span>
             <Input
@@ -1846,9 +2328,13 @@ export function App() {
             </Button>
           </div>
         </div>
+        </div>
       </div>
+      )}
       </div>
-    </div>
+      <CookieConsentBanner lastLoggedDate={lastLoggedDate} />
+      </SidebarInset>
+    </SidebarProvider>
   )
 }
 

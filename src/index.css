@@ -121,12 +121,28 @@
   * {
     @apply border-border outline-ring/50;
     }
-  body {
-    @apply bg-background text-foreground;
-    }
   html {
-    @apply font-mono;
+    @apply bg-muted font-mono;
+    overflow: auto;
+    -ms-overflow-style: none;
+    scrollbar-width: none;
     }
+  body {
+    @apply bg-muted text-foreground;
+    min-height: 100svh;
+    overflow: auto;
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+    }
+  #root {
+    min-height: 100svh;
+    background: var(--color-muted);
+  }
+
+  body::-webkit-scrollbar,
+  html::-webkit-scrollbar {
+    display: none;
+  }
 }
 
 @layer utilities {

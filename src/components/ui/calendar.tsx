@@ -116,7 +116,7 @@ function Calendar({
           defaultClassNames.range_end
         ),
         today: cn(
-          "rounded-(--cell-radius) bg-muted text-foreground data-[selected=true]:rounded-none",
+          "rounded-(--cell-radius) bg-muted text-red-700/80 data-[selected=true]:rounded-none",
           defaultClassNames.today
         ),
         outside: cn(
@@ -165,7 +165,7 @@ function Calendar({
           return (
             <td {...props}>
               <div className="flex size-(--cell-size) items-center justify-center text-center">
-                {children}
+                {`W${children}`}
               </div>
             </td>
           )
