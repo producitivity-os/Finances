@@ -5,6 +5,7 @@ import {
   GalleryVerticalEnd,
   Settings2,
   ArrowLeftRight,
+  Tag,
   User,
 } from "lucide-react"
 
@@ -52,6 +53,11 @@ const data = {
       title: "Accounts",
       url: "#/accounts",
       icon: User,
+    },
+    {
+      title: "Categories",
+      url: "#/categories",
+      icon: Tag,
     },
     {
       title: "Settings",

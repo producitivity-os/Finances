@@ -66,6 +66,19 @@ struct UpdateRecordPayload {
 }
 
 #[derive(Debug, Deserialize)]
+struct UpdateAccountPayload {
+  id: String,
+  display_name: String,
+  account_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct MergeAccountsPayload {
+  from_id: String,
+  into_id: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct ImportLedgerPayload {
   accounts: Vec<CreateAccountPayload>,
   records: Vec<CreateRecordPayload>,
@@ -162,6 +175,55 @@ fn create_account(
     map_account,
   )
   .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn update_account(
+  payload: UpdateAccountPayload,
+  state: tauri::State<'_, AppState>,
+) -> Result<Account, String> {
+  let db = state.db.lock().map_err(|e| e.to_string())?;
+  let updated = db
+    .execute(
+      "UPDATE accounts SET display_name = ?1, account_name = ?2 WHERE id = ?3",
+      params![payload.display_name, payload.account_name, payload.id],
+    )
+    .map_err(|e| e.to_string())?;
+
+  if updated == 0 {
+    return Err("Account not found".to_string());
+  }
+
+  db.query_row(
+    "SELECT id, display_name, account_name, type FROM accounts WHERE id = ?1",
+    [payload.id],
+    map_account,
+  )
+  .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn merge_accounts(
+  payload: MergeAccountsPayload,
+  state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+  let db = state.db.lock().map_err(|e| e.to_string())?;
+  db.execute(
+    "UPDATE records SET account_from_id = ?1 WHERE account_from_id = ?2",
+    params![payload.into_id, payload.from_id],
+  )
+  .map_err(|e| e.to_string())?;
+  db.execute(
+    "UPDATE records SET payee_to_id = ?1 WHERE payee_to_id = ?2",
+    params![payload.into_id, payload.from_id],
+  )
+  .map_err(|e| e.to_string())?;
+  db.execute(
+    "DELETE FROM accounts WHERE id = ?1",
+    params![payload.from_id],
+  )
+  .map_err(|e| e.to_string())?;
+  Ok(())
 }
 
 #[tauri::command]
@@ -347,6 +409,8 @@ pub fn run() {
     .invoke_handler(tauri::generate_handler![
       list_accounts,
       create_account,
+      update_account,
+      merge_accounts,
       list_records,
       create_record,
       update_record,
