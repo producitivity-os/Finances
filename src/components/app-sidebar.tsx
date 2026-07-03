@@ -3,10 +3,12 @@ import {
   AudioWaveform,
   Command,
   GalleryVerticalEnd,
-  Settings2,
-  ArrowLeftRight,
+  HandCoins,
+  Handshake,
   Tag,
   User,
+  Store,
+  Repeat,
 } from "lucide-react"
 
 import { NavMain } from "@/components/nav-main"
@@ -21,11 +23,6 @@ import {
 } from "@/components/ui/sidebar"
 
 const data = {
-  user: {
-    name: "Mustafa",
-    email: "m@example.com",
-    avatar: "/avatars/shadcn.jpg",
-  },
   teams: [
     {
       name: "Finances",
@@ -47,7 +44,7 @@ const data = {
     {
       title: "Transactions",
       url: "#/transactions",
-      icon: ArrowLeftRight,
+      icon: HandCoins,
     },
     {
       title: "Accounts",
@@ -55,19 +52,42 @@ const data = {
       icon: User,
     },
     {
+      title: "Payees",
+      url: "#/payees",
+      icon: Store,
+    },
+    {
       title: "Categories",
       url: "#/categories",
       icon: Tag,
     },
     {
-      title: "Settings",
-      url: "#/settings",
-      icon: Settings2,
+      title: "Loans",
+      url: "#/loans",
+      icon: Handshake,
+    },
+    {
+      title: "Recurring",
+      url: "#/recurring",
+      icon: Repeat,
     },
   ],
 }
 
-export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
+export function AppSidebar({
+  user,
+  onLogout,
+  notificationCount,
+  ...props
+}: React.ComponentProps<typeof Sidebar> & {
+  user: {
+    name: string
+    email: string
+    avatar: string
+  }
+  onLogout: () => void
+  notificationCount: number
+}) {
   const [currentRoute, setCurrentRoute] = React.useState(() =>
     window.location.hash || "#/transactions"
   )
@@ -95,12 +115,20 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
         <NavMain
           items={data.navMain.map((item) => ({
             ...item,
+            badge:
+              item.url === "#/notifications" && notificationCount > 0
+                ? String(notificationCount)
+                : item.badge,
             isActive: item.url === currentRoute,
           }))}
         />
       </SidebarContent>
       <SidebarFooter>
-        <NavUser user={data.user} />
+        <NavUser
+          user={user}
+          onLogout={onLogout}
+          notificationCount={notificationCount}
+        />
       </SidebarFooter>
       <SidebarRail />
     </Sidebar>

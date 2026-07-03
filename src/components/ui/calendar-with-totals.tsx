@@ -179,6 +179,10 @@ function CalendarWithTotals({
           )
         },
         Week: ({ children, week, ...props }: any) => {
+          if (!getWeekTotal) {
+            return <tr {...props}>{children}</tr>
+          }
+
           const weekDates: Date[] = (week?.days ?? [])
             .map((d: any) => (d?.date instanceof Date ? d.date : null))
             .filter((d: Date | null): d is Date => d instanceof Date)
@@ -241,4 +245,4 @@ function CalendarDayButton({
   )
 }
 
-export { CalendarWithTotals }
+export { CalendarWithTotals, CalendarDayButton }

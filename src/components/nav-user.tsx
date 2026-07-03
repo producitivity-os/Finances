@@ -1,8 +1,8 @@
 import {
-  BadgeCheck,
   Bell,
   ChevronsUpDown,
   LogOut,
+  Settings,
 } from "lucide-react"
 
 import {
@@ -23,12 +23,16 @@ import {
 
 export function NavUser({
   user,
+  onLogout,
+  notificationCount,
 }: {
   user: {
     name: string
     email: string
     avatar: string
   }
+  onLogout: () => void
+  notificationCount: number
 }) {
   const { isMobile } = useSidebar()
 
@@ -58,7 +62,10 @@ export function NavUser({
             sideOffset={4}
           >
             <DropdownMenuLabel className="p-0 font-normal">
-              <div className="flex items-center gap-2 px-1 py-1.5 text-left text-sm">
+              <a
+                href="#/profile"
+                className="flex items-center gap-2 px-1 py-1.5 text-left text-sm hover:bg-accent"
+              >
                 <div className="flex h-8 w-8 items-center justify-center rounded-bl-lg border text-xs font-semibold">
                   {user.name.slice(0, 2).toUpperCase()}
                 </div>
@@ -66,21 +73,30 @@ export function NavUser({
                   <span className="truncate font-medium">{user.name}</span>
                   <span className="truncate text-xs">{user.email}</span>
                 </div>
-              </div>
+              </a>
             </DropdownMenuLabel>
             <DropdownMenuSeparator />
             <DropdownMenuGroup>
-              <DropdownMenuItem>
-                <BadgeCheck />
-                Account
+              <DropdownMenuItem asChild>
+                <a href="#/notifications">
+                  <Bell />
+                  Notifications
+                  {notificationCount > 0 ? (
+                    <span className="ml-auto border px-1.5 py-0.5 text-[10px] leading-none tabular-nums">
+                      {notificationCount}
+                    </span>
+                  ) : null}
+                </a>
               </DropdownMenuItem>
-              <DropdownMenuItem>
-                <Bell />
-                Notifications
+              <DropdownMenuItem asChild>
+                <a href="#/settings">
+                  <Settings />
+                  Settings
+                </a>
               </DropdownMenuItem>
             </DropdownMenuGroup>
             <DropdownMenuSeparator />
-            <DropdownMenuItem>
+            <DropdownMenuItem onClick={onLogout}>
               <LogOut />
               Log out
             </DropdownMenuItem>

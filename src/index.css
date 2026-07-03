@@ -146,6 +146,23 @@
 }
 
 @layer utilities {
+  @keyframes login-pattern-drift {
+    from {
+      transform: translate3d(0, 0, 0);
+    }
+    to {
+      transform: translate3d(72px, 72px, 0);
+    }
+  }
+
+  .login-pattern-layer {
+    animation: login-pattern-drift 12s linear infinite;
+  }
+
+  .login-pattern-delay {
+    animation-delay: -6s;
+  }
+
   .no-scrollbar {
     -ms-overflow-style: none;
     scrollbar-width: none;

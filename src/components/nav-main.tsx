@@ -22,6 +22,7 @@ export function NavMain({
   items: {
     title: string
     url: string
+    badge?: string
     icon?: LucideIcon
     isActive?: boolean
     items?: {
@@ -71,6 +72,11 @@ export function NavMain({
                 <a href={item.url}>
                   {item.icon && <item.icon />}
                   <span>{item.title}</span>
+                  {item.badge ? (
+                    <span className="ml-auto border px-1.5 py-0.5 text-[10px] leading-none tabular-nums">
+                      {item.badge}
+                    </span>
+                  ) : null}
                 </a>
               </SidebarMenuButton>
             </SidebarMenuItem>

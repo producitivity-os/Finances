@@ -14,6 +14,7 @@
   "dependencies": {
     "@base-ui/react": "^1.4.1",
     "@fontsource-variable/jetbrains-mono": "^5.2.8",
+    "@hello-pangea/dnd": "^18.0.1",
     "@phosphor-icons/react": "^2.1.10",
     "@tailwindcss/vite": "^4.2.1",
     "@tauri-apps/api": "^2.11.0",
