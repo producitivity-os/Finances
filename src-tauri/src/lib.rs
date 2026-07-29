@@ -1,6 +1,8 @@
 use rusqlite::{params, Connection};
 use rfd::FileDialog;
+use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::{
   fs,
   path::PathBuf,
@@ -30,7 +32,8 @@ struct DataSourceInfo {
 const DEFAULT_LOGIN_EMAIL: &str = "mustafa.y.elagib@gmail.com";
 const DEFAULT_LOGIN_PASSWORD: &str = "Abutoofa2003+";
 const DEFAULT_LOGIN_NAME: &str = "Mustafa Yousif";
-const SESSION_TTL_SECONDS: i64 = 60 * 60;
+const SESSION_TTL_SECONDS: i64 = 60 * 60 * 24 * 183;
+const FINVERSE_BASE_URL: &str = "https://api.prod.finverse.net";
 
 #[derive(Debug, Serialize)]
 struct Account {
@@ -68,6 +71,7 @@ struct Record {
   description: String,
   category: String,
   flagged: bool,
+  archived: bool,
   created_at: String,
 }
 
@@ -87,6 +91,7 @@ struct CreateRecordPayload {
   description: String,
   category: String,
   flagged: Option<bool>,
+  archived: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -105,6 +110,7 @@ struct UpdateRecordPayload {
   description: String,
   category: String,
   flagged: Option<bool>,
+  archived: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -120,6 +126,87 @@ struct UpdateAccountPayload {
 struct UpdateRecordCategoryPayload {
   from_category: String,
   to_category: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct FinverseCredentialsPayload {
+  client_id: String,
+  client_secret: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct FinverseCreateLinkPayload {
+  client_id: String,
+  client_secret: String,
+  user_id: String,
+  redirect_uri: String,
+  state: String,
+  ui_mode: String,
+  response_mode: String,
+  language: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct FinverseExchangeCodePayload {
+  client_id: String,
+  client_secret: String,
+  redirect_uri: String,
+  code: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct FinverseCustomerTokenResponse {
+  access_token: String,
+  expires_in: i64,
+  issued_at: String,
+  token_type: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct FinverseLinkTokenResponse {
+  access_token: String,
+  expires_in: i64,
+  issued_at: String,
+  link_url: String,
+  token_type: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct FinverseLoginIdentityTokenResponse {
+  access_token: String,
+  expires_in: i64,
+  issued_at: String,
+  login_identity_id: String,
+  refresh_token: String,
+  token_type: String,
+}
+
+#[derive(Debug, Serialize)]
+struct Budget {
+  id: String,
+  category: String,
+  amount: String,
+  currency: String,
+  period: String,
+  created_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateBudgetPayload {
+  id: String,
+  category: String,
+  amount: String,
+  currency: String,
+  period: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateBudgetPayload {
+  id: String,
+  category: String,
+  amount: String,
+  currency: String,
+  period: String,
 }
 
 fn ensure_accounts_table_columns(db: &Connection) -> Result<(), String> {
@@ -169,6 +256,11 @@ fn ensure_records_table_columns(db: &Connection) -> Result<(), String> {
 
   if !column_names.iter().any(|name| name == "flagged") {
     db.execute("ALTER TABLE records ADD COLUMN flagged INTEGER NOT NULL DEFAULT 0", [])
+      .map_err(|e| e.to_string())?;
+  }
+
+  if !column_names.iter().any(|name| name == "archived") {
+    db.execute("ALTER TABLE records ADD COLUMN archived INTEGER NOT NULL DEFAULT 0", [])
       .map_err(|e| e.to_string())?;
   }
 
@@ -223,11 +315,12 @@ fn ensure_records_table_shape(db: &Connection) -> Result<(), String> {
       description TEXT NOT NULL,
       category TEXT NOT NULL,
       flagged INTEGER NOT NULL DEFAULT 0,
+      archived INTEGER NOT NULL DEFAULT 0,
       record_index INTEGER,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
     INSERT INTO records__migrated (
-      id, date, account_from_id, payee_to_id, waived_by_account_id, type, amount, currency, detail, description, category, flagged, record_index, created_at
+      id, date, account_from_id, payee_to_id, waived_by_account_id, type, amount, currency, detail, description, category, flagged, archived, record_index, created_at
     )
     SELECT
       id,
@@ -241,6 +334,7 @@ fn ensure_records_table_shape(db: &Connection) -> Result<(), String> {
       detail,
       description,
       category,
+      0,
       0,
       NULL,
       COALESCE(created_at, CURRENT_TIMESTAMP)
@@ -331,7 +425,7 @@ fn build_backup_csv(db: &Connection) -> Result<(String, usize, usize), String> {
 
   let mut records_stmt = db
     .prepare(
-      "SELECT id, date, record_index, account_from_id, payee_to_id, waived_by_account_id, type, amount, currency, detail, description, category, flagged FROM records ORDER BY date ASC, record_index ASC, created_at ASC",
+      "SELECT id, date, record_index, account_from_id, payee_to_id, waived_by_account_id, type, amount, currency, detail, description, category, flagged, archived FROM records ORDER BY date ASC, record_index ASC, created_at ASC",
     )
     .map_err(|e| e.to_string())?;
   let record_rows = records_stmt
@@ -350,6 +444,7 @@ fn build_backup_csv(db: &Connection) -> Result<(String, usize, usize), String> {
         row.get::<_, String>(10)?,
         row.get::<_, String>(11)?,
         row.get::<_, i64>(12)?,
+        row.get::<_, i64>(13)?,
       ))
     })
     .map_err(|e| e.to_string())?;
@@ -377,13 +472,13 @@ fn build_backup_csv(db: &Connection) -> Result<(String, usize, usize), String> {
   }
 
   out.push_str("[records]\n");
-  out.push_str("id,date,index,account_from_id,payee_to_id,waived_by_account_id,type,amount,currency,detail,description,category,flagged\n");
+  out.push_str("id,date,index,account_from_id,payee_to_id,waived_by_account_id,type,amount,currency,detail,description,category,flagged,archived\n");
   for row in record_rows {
-    let (id, date, record_index, account_from_id, payee_to_id, waived_by_account_id, record_type, amount, currency, detail, description, category, flagged) =
+    let (id, date, record_index, account_from_id, payee_to_id, waived_by_account_id, record_type, amount, currency, detail, description, category, flagged, archived) =
       row.map_err(|e| e.to_string())?;
     record_count += 1;
     out.push_str(&format!(
-      "{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+      "{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
       escape_csv_cell(&id),
       escape_csv_cell(&date),
       record_index,
@@ -396,7 +491,8 @@ fn build_backup_csv(db: &Connection) -> Result<(String, usize, usize), String> {
       escape_csv_cell(&detail),
       escape_csv_cell(&description),
       escape_csv_cell(&category),
-      flagged
+      flagged,
+      archived
     ));
   }
 
@@ -502,6 +598,10 @@ fn parse_backup_csv(
           .get(category_index + 1)
           .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
           .or(Some(false)),
+        archived: columns
+          .get(category_index + 2)
+          .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+          .or(Some(false)),
       });
       continue;
     }
@@ -552,7 +652,7 @@ fn restore_backup_rows(
       .unwrap_or(1)
     });
     tx.execute(
-      "INSERT INTO records (id, date, record_index, account_from_id, payee_to_id, waived_by_account_id, type, amount, currency, detail, description, category, flagged) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+      "INSERT INTO records (id, date, record_index, account_from_id, payee_to_id, waived_by_account_id, type, amount, currency, detail, description, category, flagged, archived) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
       params![
         record.id,
         record.date,
@@ -566,7 +666,8 @@ fn restore_backup_rows(
         record.detail,
         record.description,
         record.category,
-        record.flagged.unwrap_or(false)
+        record.flagged.unwrap_or(false),
+        record.archived.unwrap_or(false)
       ],
     )
     .map_err(|e| {
@@ -720,6 +821,7 @@ fn init_db(db: &Connection) -> Result<(), String> {
       description TEXT NOT NULL,
       category TEXT NOT NULL,
       flagged INTEGER NOT NULL DEFAULT 0,
+      archived INTEGER NOT NULL DEFAULT 0,
       record_index INTEGER,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
@@ -729,6 +831,15 @@ fn init_db(db: &Connection) -> Result<(), String> {
       password TEXT NOT NULL,
       full_name TEXT NOT NULL DEFAULT '',
       avatar_url TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS budgets (
+      id TEXT PRIMARY KEY,
+      category TEXT NOT NULL,
+      amount TEXT NOT NULL,
+      currency TEXT NOT NULL,
+      period TEXT NOT NULL CHECK(period IN ('weekly', 'monthly', 'yearly')),
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
     ",
@@ -811,7 +922,19 @@ fn map_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<Record> {
     description: row.get(10)?,
     category: row.get(11)?,
     flagged: row.get::<_, i64>(12)? != 0,
-    created_at: row.get(13)?,
+    archived: row.get::<_, i64>(13)? != 0,
+    created_at: row.get(14)?,
+  })
+}
+
+fn map_budget(row: &rusqlite::Row<'_>) -> rusqlite::Result<Budget> {
+  Ok(Budget {
+    id: row.get(0)?,
+    category: row.get(1)?,
+    amount: row.get(2)?,
+    currency: row.get(3)?,
+    period: row.get(4)?,
+    created_at: row.get(5)?,
   })
 }
 
@@ -965,7 +1088,7 @@ fn list_records(state: tauri::State<'_, AppState>) -> Result<Vec<Record>, String
   let db = state.db.lock().map_err(|e| e.to_string())?;
   let mut stmt = db
     .prepare(
-      "SELECT id, date, record_index, account_from_id, payee_to_id, waived_by_account_id, type, amount, currency, detail, description, category, flagged, created_at FROM records ORDER BY date ASC, record_index ASC, created_at ASC",
+      "SELECT id, date, record_index, account_from_id, payee_to_id, waived_by_account_id, type, amount, currency, detail, description, category, flagged, archived, created_at FROM records ORDER BY date ASC, record_index ASC, created_at ASC",
     )
     .map_err(|e| e.to_string())?;
 
@@ -988,7 +1111,7 @@ fn create_record(
     _ => next_record_index_for_date(&db, &payload.date)?,
   };
   db.execute(
-    "INSERT INTO records (id, date, record_index, account_from_id, payee_to_id, waived_by_account_id, type, amount, currency, detail, description, category, flagged) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+    "INSERT INTO records (id, date, record_index, account_from_id, payee_to_id, waived_by_account_id, type, amount, currency, detail, description, category, flagged, archived) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
     params![
       payload.id,
       payload.date,
@@ -1002,13 +1125,14 @@ fn create_record(
       payload.detail,
       payload.description,
       payload.category,
-      payload.flagged.unwrap_or(false)
+      payload.flagged.unwrap_or(false),
+      payload.archived.unwrap_or(false)
     ],
   )
   .map_err(|e| e.to_string())?;
 
   db.query_row(
-    "SELECT id, date, record_index, account_from_id, payee_to_id, waived_by_account_id, type, amount, currency, detail, description, category, flagged, created_at FROM records WHERE id = ?1",
+    "SELECT id, date, record_index, account_from_id, payee_to_id, waived_by_account_id, type, amount, currency, detail, description, category, flagged, archived, created_at FROM records WHERE id = ?1",
     [payload.id],
     map_record,
   )
@@ -1035,7 +1159,7 @@ fn update_record(
   };
   let updated = db
     .execute(
-      "UPDATE records SET date = ?1, record_index = ?2, account_from_id = ?3, payee_to_id = ?4, waived_by_account_id = ?5, type = ?6, amount = ?7, currency = ?8, detail = ?9, description = ?10, category = ?11, flagged = ?12 WHERE id = ?13",
+      "UPDATE records SET date = ?1, record_index = ?2, account_from_id = ?3, payee_to_id = ?4, waived_by_account_id = ?5, type = ?6, amount = ?7, currency = ?8, detail = ?9, description = ?10, category = ?11, flagged = ?12, archived = ?13 WHERE id = ?14",
       params![
         payload.date,
         record_index,
@@ -1049,6 +1173,7 @@ fn update_record(
         payload.description,
         payload.category,
         payload.flagged.unwrap_or(false),
+        payload.archived.unwrap_or(false),
         payload.id
       ],
     )
@@ -1059,7 +1184,7 @@ fn update_record(
   }
 
   db.query_row(
-    "SELECT id, date, record_index, account_from_id, payee_to_id, waived_by_account_id, type, amount, currency, detail, description, category, flagged, created_at FROM records WHERE id = ?1",
+    "SELECT id, date, record_index, account_from_id, payee_to_id, waived_by_account_id, type, amount, currency, detail, description, category, flagged, archived, created_at FROM records WHERE id = ?1",
     [payload.id],
     map_record,
   )
@@ -1091,6 +1216,192 @@ fn update_record_category(
     params![payload.to_category, payload.from_category],
   )
   .map_err(|e| e.to_string())
+}
+
+fn finverse_request_id(prefix: &str) -> Result<String, String> {
+  let now_seconds = SystemTime::now()
+    .duration_since(UNIX_EPOCH)
+    .map_err(|e| e.to_string())?
+    .as_secs();
+  Ok(format!("{prefix}-{now_seconds}"))
+}
+
+fn parse_finverse_response<T: for<'de> Deserialize<'de>>(
+  response: reqwest::blocking::Response,
+) -> Result<T, String> {
+  let status = response.status();
+  let text = response.text().map_err(|e| e.to_string())?;
+  if !status.is_success() {
+    return Err(format!("Finverse request failed ({status}): {text}"));
+  }
+  serde_json::from_str::<T>(&text).map_err(|e| format!("Invalid Finverse response: {e}"))
+}
+
+fn finverse_customer_token(
+  client: &Client,
+  client_id: &str,
+  client_secret: &str,
+) -> Result<FinverseCustomerTokenResponse, String> {
+  let response = client
+    .post(format!("{FINVERSE_BASE_URL}/auth/customer/token"))
+    .header("X-Request-Id", finverse_request_id(client_id)?)
+    .json(&json!({
+      "client_id": client_id,
+      "client_secret": client_secret,
+      "grant_type": "client_credentials",
+    }))
+    .send()
+    .map_err(|e| e.to_string())?;
+
+  parse_finverse_response(response)
+}
+
+#[tauri::command]
+fn finverse_generate_customer_token(
+  payload: FinverseCredentialsPayload,
+) -> Result<FinverseCustomerTokenResponse, String> {
+  let client = Client::new();
+  finverse_customer_token(&client, &payload.client_id, &payload.client_secret)
+}
+
+#[tauri::command]
+fn finverse_create_link_token(
+  payload: FinverseCreateLinkPayload,
+) -> Result<FinverseLinkTokenResponse, String> {
+  let client = Client::new();
+  let customer_token =
+    finverse_customer_token(&client, &payload.client_id, &payload.client_secret)?;
+  let response = client
+    .post(format!("{FINVERSE_BASE_URL}/link/token"))
+    .bearer_auth(customer_token.access_token)
+    .header("X-Request-Id", finverse_request_id(&payload.client_id)?)
+    .json(&json!({
+      "client_id": payload.client_id,
+      "user_id": payload.user_id,
+      "redirect_uri": payload.redirect_uri,
+      "state": payload.state,
+      "grant_type": "client_credentials",
+      "response_mode": if payload.response_mode.trim().is_empty() { "form_post" } else { payload.response_mode.trim() },
+      "response_type": "code",
+      "language": payload.language,
+      "products_requested": [],
+      "ui_mode": payload.ui_mode,
+    }))
+    .send()
+    .map_err(|e| e.to_string())?;
+
+  parse_finverse_response(response)
+}
+
+#[tauri::command]
+fn finverse_exchange_code(
+  payload: FinverseExchangeCodePayload,
+) -> Result<FinverseLoginIdentityTokenResponse, String> {
+  let client = Client::new();
+  let customer_token =
+    finverse_customer_token(&client, &payload.client_id, &payload.client_secret)?;
+  let response = client
+    .post(format!("{FINVERSE_BASE_URL}/auth/token"))
+    .bearer_auth(customer_token.access_token)
+    .header("X-Request-Id", finverse_request_id(&payload.client_id)?)
+    .form(&[
+      ("client_id", payload.client_id.as_str()),
+      ("code", payload.code.as_str()),
+      ("redirect_uri", payload.redirect_uri.as_str()),
+      ("grant_type", "authorization_code"),
+    ])
+    .send()
+    .map_err(|e| e.to_string())?;
+
+  parse_finverse_response(response)
+}
+
+#[tauri::command]
+fn list_budgets(state: tauri::State<'_, AppState>) -> Result<Vec<Budget>, String> {
+  let db = state.db.lock().map_err(|e| e.to_string())?;
+  let mut stmt = db
+    .prepare(
+      "SELECT id, category, amount, currency, period, created_at FROM budgets ORDER BY category ASC, created_at ASC",
+    )
+    .map_err(|e| e.to_string())?;
+
+  let rows = stmt
+    .query_map([], map_budget)
+    .map_err(|e| e.to_string())?;
+
+  rows.collect::<Result<Vec<_>, _>>()
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn create_budget(
+  payload: CreateBudgetPayload,
+  state: tauri::State<'_, AppState>,
+) -> Result<Budget, String> {
+  let db = state.db.lock().map_err(|e| e.to_string())?;
+  db.execute(
+    "INSERT INTO budgets (id, category, amount, currency, period) VALUES (?1, ?2, ?3, ?4, ?5)",
+    params![
+      payload.id,
+      payload.category,
+      payload.amount,
+      payload.currency,
+      payload.period
+    ],
+  )
+  .map_err(|e| e.to_string())?;
+
+  db.query_row(
+    "SELECT id, category, amount, currency, period, created_at FROM budgets WHERE id = ?1",
+    [payload.id],
+    map_budget,
+  )
+  .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn update_budget(
+  payload: UpdateBudgetPayload,
+  state: tauri::State<'_, AppState>,
+) -> Result<Budget, String> {
+  let db = state.db.lock().map_err(|e| e.to_string())?;
+  let updated = db
+    .execute(
+      "UPDATE budgets SET category = ?1, amount = ?2, currency = ?3, period = ?4 WHERE id = ?5",
+      params![
+        payload.category,
+        payload.amount,
+        payload.currency,
+        payload.period,
+        payload.id
+      ],
+    )
+    .map_err(|e| e.to_string())?;
+
+  if updated == 0 {
+    return Err("Budget not found".to_string());
+  }
+
+  db.query_row(
+    "SELECT id, category, amount, currency, period, created_at FROM budgets WHERE id = ?1",
+    [payload.id],
+    map_budget,
+  )
+  .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_budget(id: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
+  let db = state.db.lock().map_err(|e| e.to_string())?;
+  let deleted = db
+    .execute("DELETE FROM budgets WHERE id = ?1", params![id])
+    .map_err(|e| e.to_string())?;
+
+  if deleted == 0 {
+    return Err("Budget not found".to_string());
+  }
+
+  Ok(())
 }
 
 #[tauri::command]
@@ -1131,7 +1442,7 @@ fn import_ledger(
       .unwrap_or(1)
     });
     tx.execute(
-      "INSERT INTO records (id, date, record_index, account_from_id, payee_to_id, waived_by_account_id, type, amount, currency, detail, description, category, flagged) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+      "INSERT INTO records (id, date, record_index, account_from_id, payee_to_id, waived_by_account_id, type, amount, currency, detail, description, category, flagged, archived) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
       params![
         record.id,
         record.date,
@@ -1145,7 +1456,8 @@ fn import_ledger(
         record.detail,
         record.description,
         record.category,
-        record.flagged.unwrap_or(false)
+        record.flagged.unwrap_or(false),
+        record.archived.unwrap_or(false)
       ],
     )
     .map_err(|e| e.to_string())?;
@@ -1364,6 +1676,7 @@ fn resolve_prod_db_path(app: &tauri::App) -> Result<PathBuf, Box<dyn std::error:
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
   tauri::Builder::default()
+    .plugin(tauri_plugin_deep_link::init())
     .setup(|app| {
       if cfg!(debug_assertions) {
         app.handle().plugin(
@@ -1398,6 +1711,13 @@ pub fn run() {
       update_record,
       delete_record,
       update_record_category,
+      finverse_generate_customer_token,
+      finverse_create_link_token,
+      finverse_exchange_code,
+      list_budgets,
+      create_budget,
+      update_budget,
+      delete_budget,
       import_ledger,
       export_backup_csv,
       export_backup_csv_to_path,

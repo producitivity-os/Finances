@@ -1,4 +1,4 @@
-import type { RecordItem } from "@/lib/types"
+import type { Budget, RecordItem } from "@/lib/types"
 
 export type NotificationItem = {
   id: string
@@ -6,7 +6,7 @@ export type NotificationItem = {
   message: string
   timestamp: string
   read: boolean
-  kind: "system" | "finance-log"
+  kind: "system" | "finance-log" | "budget"
 }
 
 export const baseNotifications: Omit<NotificationItem, "read">[] = [
@@ -86,12 +86,69 @@ export const buildFinanceLogNotifications = (
   ]
 }
 
+const startOfPeriod = (period: Budget["period"], now: Date) => {
+  if (period === "yearly") return new Date(now.getFullYear(), 0, 1)
+  if (period === "monthly") return new Date(now.getFullYear(), now.getMonth(), 1)
+
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  const mondayOffset = (start.getDay() + 6) % 7
+  start.setDate(start.getDate() - mondayOffset)
+  return start
+}
+
+const formatCurrency = (currency: string, amount: number) => {
+  const prefix = currency === "MYR" || currency === "RM" ? "RM" : currency
+  return `${prefix} ${amount.toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`
+}
+
+export const buildBudgetNotifications = (
+  records: RecordItem[],
+  budgets: Budget[],
+  now = new Date()
+): Omit<NotificationItem, "read">[] =>
+  budgets.flatMap((budget) => {
+    const limit = Number.parseFloat(budget.amount)
+    if (!Number.isFinite(limit) || limit <= 0) return []
+
+    const periodStart = startOfPeriod(budget.period, now)
+    const spent = records
+      .filter((record) => {
+        if (record.type !== "Expense" || record.category !== budget.category) return false
+        const recordDate = new Date(`${record.date}T00:00:00`)
+        return recordDate >= periodStart && recordDate <= now
+      })
+      .reduce((total, record) => total + (Number.parseFloat(record.amount) || 0), 0)
+
+    if (spent <= limit) return []
+
+    const periodKey = formatDateKey(periodStart)
+    return [
+      {
+        id: `budget-${budget.id}-${periodKey}`,
+        title: "Budget exceeded",
+        message: `${budget.category} spending is ${formatCurrency(
+          budget.currency,
+          spent
+        )}, above your ${budget.period} budget of ${formatCurrency(budget.currency, limit)}.`,
+        timestamp: `${formatDateKey(now)} 08:30`,
+        kind: "budget" as const,
+      },
+    ]
+  })
+
 export const buildNotifications = (
   records: RecordItem[],
+  budgets: Budget[],
   readIds: Set<string>
 ): NotificationItem[] =>
-  [...buildFinanceLogNotifications(records), ...baseNotifications].map((item) => ({
+  [
+    ...buildBudgetNotifications(records, budgets),
+    ...buildFinanceLogNotifications(records),
+    ...baseNotifications,
+  ].map((item) => ({
     ...item,
     read: readIds.has(item.id) || item.id === "notif-3",
   }))
-

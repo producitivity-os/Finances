@@ -1,4 +1,10 @@
 import { Fragment } from "react"
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu"
 import type { Account, RecordItem } from "@/lib/types"
 
 type Props = {
@@ -16,43 +22,50 @@ type LoanDirection = "owed-to-me" | "i-owe" | "neutral"
 
 const getAmount = (record: RecordItem) => Number.parseFloat(record.amount || "0") || 0
 
+const openTransactionInOverview = (record: RecordItem) => {
+  sessionStorage.setItem("finance-open-record-id", record.id)
+  window.location.hash = "/transactions"
+}
+
 export function LoansPage({ records, currentUserEmail }: Props) {
   const isPersonalAccount = (account?: Account | null) =>
     account?.ownerEmail?.toLowerCase() === currentUserEmail.toLowerCase()
 
   const getLoanDirection = (record: RecordItem): LoanDirection => {
-    if (record.waivedBy) {
-      const paidByMe = isPersonalAccount(record.accountFrom)
-      const reimbursedByMe = isPersonalAccount(record.waivedBy)
-      if (paidByMe && !reimbursedByMe) return "owed-to-me"
-      if (!paidByMe && reimbursedByMe) return "i-owe"
-    }
-
-    const fromPersonal = isPersonalAccount(record.accountFrom)
-    const toPersonal = isPersonalAccount(record.payeeTo)
-    if (fromPersonal && !toPersonal) return "owed-to-me"
-    if (!fromPersonal && toPersonal) return "i-owe"
+    if (!record.waivedBy) return "neutral"
+    const paidByMe = isPersonalAccount(record.accountFrom)
+    const receivedByMe = isPersonalAccount(record.payeeTo)
+    const reimbursedByMe = isPersonalAccount(record.waivedBy)
+    if (receivedByMe && !paidByMe) return "owed-to-me"
+    if (paidByMe && !reimbursedByMe) return "owed-to-me"
+    if (!paidByMe && reimbursedByMe) return "i-owe"
     return "neutral"
+  }
+
+  const getSignedLoanAmount = (record: RecordItem) => {
+    if (!record.waivedBy) return 0
+    const amount = getAmount(record)
+    const paidByMe = isPersonalAccount(record.accountFrom)
+    const receivedByMe = isPersonalAccount(record.payeeTo)
+    const reimbursedByMe = isPersonalAccount(record.waivedBy)
+
+    if (receivedByMe && !paidByMe) return -amount
+    if (paidByMe && !reimbursedByMe) return amount
+    if (!paidByMe && reimbursedByMe) return -amount
+    return 0
   }
 
   const getCounterparty = (record: RecordItem) => {
     const direction = getLoanDirection(record)
+    if (record.waivedBy && isPersonalAccount(record.payeeTo) && !isPersonalAccount(record.accountFrom)) {
+      return record.accountFrom
+    }
     if (record.waivedBy && direction === "owed-to-me") return record.waivedBy
     if (record.waivedBy && direction === "i-owe") return record.accountFrom
-    if (direction === "owed-to-me") return record.payeeTo
-    if (direction === "i-owe") return record.accountFrom
-    return record.waivedBy ?? record.payeeTo
+    return record.waivedBy
   }
 
-  const loanRecords = records.filter(
-    (record) => record.waivedBy || record.category.toLowerCase() === "loan"
-  )
-  const owedToMeTotal = loanRecords
-    .filter((record) => getLoanDirection(record) === "owed-to-me")
-    .reduce((sum, record) => sum + getAmount(record), 0)
-  const iOweTotal = loanRecords
-    .filter((record) => getLoanDirection(record) === "i-owe")
-    .reduce((sum, record) => sum + getAmount(record), 0)
+  const loanRecords = records.filter((record) => record.waivedBy)
   const loanGroups = Array.from(
     loanRecords.reduce((map, record) => {
       const counterparty = getCounterparty(record)
@@ -70,14 +83,15 @@ export function LoansPage({ records, currentUserEmail }: Props) {
     .map(([, group]) => ({
       ...group,
       records: group.records.sort((a, b) => b.date.localeCompare(a.date)),
-      total: group.records.reduce((sum, record) => {
-        const direction = getLoanDirection(record)
-        if (direction === "owed-to-me") return sum + getAmount(record)
-        if (direction === "i-owe") return sum - getAmount(record)
-        return sum
-      }, 0),
+      total: group.records.reduce((sum, record) => sum + getSignedLoanAmount(record), 0),
     }))
     .sort((a, b) => a.name.localeCompare(b.name))
+  const owedToMeTotal = loanGroups
+    .filter((group) => group.total > 0)
+    .reduce((sum, group) => sum + group.total, 0)
+  const iOweTotal = loanGroups
+    .filter((group) => group.total < 0)
+    .reduce((sum, group) => sum + Math.abs(group.total), 0)
 
   return (
     <div className="w-full pb-20 pt-4 md:mx-auto md:max-w-6xl md:px-1 md:pt-6">
@@ -85,7 +99,7 @@ export function LoansPage({ records, currentUserEmail }: Props) {
         <div className="border-y bg-card p-4 md:border">
           <h1 className="text-lg font-semibold tracking-tight">Loans</h1>
           <p className="mt-1 text-xs text-muted-foreground">
-            Transactions marked as loans or expected to be reimbursed.
+            Transactions marked as waived and expected to be reimbursed.
           </p>
           <div className="mt-3 flex flex-wrap gap-4 border-t pt-3 text-xs">
             <span>
@@ -142,26 +156,35 @@ export function LoansPage({ records, currentUserEmail }: Props) {
                       </td>
                     </tr>
                     {group.records.map((record) => {
-                      const direction = getLoanDirection(record)
+                      const signedAmount = getSignedLoanAmount(record)
                       const amountClass =
-                        direction === "owed-to-me"
+                        signedAmount > 0
                           ? "text-green-700"
-                          : direction === "i-owe"
+                          : signedAmount < 0
                           ? "text-red-700"
                           : "text-muted-foreground"
                       return (
-                        <tr key={record.id} className="border-t bg-card hover:bg-muted/60">
-                          <td className="px-3 py-2 pl-6">{record.date}</td>
-                          <td className="px-3 py-2">{record.accountFrom.displayName}</td>
-                          <td className="px-3 py-2">
-                            {record.waivedBy?.displayName ?? record.payeeTo.displayName}
-                          </td>
-                          <td className="px-3 py-2">{record.category}</td>
-                          <td className="px-3 py-2">{record.detail || "-"}</td>
-                          <td className={`px-3 py-2 text-right font-medium ${amountClass}`}>
-                            {record.currency} {formatMoney(getAmount(record))}
-                          </td>
-                        </tr>
+                        <ContextMenu key={record.id}>
+                          <ContextMenuTrigger asChild>
+                            <tr className="border-t bg-card hover:bg-muted/60">
+                              <td className="px-3 py-2 pl-6">{record.date}</td>
+                              <td className="px-3 py-2">{record.accountFrom.displayName}</td>
+                              <td className="px-3 py-2">
+                                {record.waivedBy?.displayName ?? record.payeeTo.displayName}
+                              </td>
+                              <td className="px-3 py-2">{record.category}</td>
+                              <td className="px-3 py-2">{record.detail || "-"}</td>
+                              <td className={`px-3 py-2 text-right font-medium ${amountClass}`}>
+                                {record.currency} {formatMoney(getAmount(record))}
+                              </td>
+                            </tr>
+                          </ContextMenuTrigger>
+                          <ContextMenuContent className="w-44">
+                            <ContextMenuItem onSelect={() => openTransactionInOverview(record)}>
+                              Open in transactions
+                            </ContextMenuItem>
+                          </ContextMenuContent>
+                        </ContextMenu>
                       )
                     })}
                   </Fragment>

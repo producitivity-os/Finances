@@ -2,7 +2,7 @@ import {
   Fragment, useEffect, useMemo, useRef, useState, type KeyboardEvent
 } from "react"
 import type { DateRange } from "react-day-picker"
-import { Area, AreaChart, Bar, BarChart, CartesianGrid, Line, XAxis } from "recharts"
+import { Area, AreaChart, Bar, BarChart, CartesianGrid, Line, Pie, PieChart, ReferenceLine, XAxis, YAxis } from "recharts"
 import { invoke } from "@tauri-apps/api/core"
 import {
   DragDropContext,
@@ -26,6 +26,10 @@ import {
   FlagIcon,
   CaretLeftIcon,
   CaretRightIcon,
+  ArchiveBoxIcon,
+  CaretDownIcon,
+  CheckIcon,
+  MinusIcon,
 } from "@phosphor-icons/react"
 import type { Dispatch, SetStateAction } from "react"
 
@@ -44,6 +48,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
+import { Slider } from "@/components/ui/slider"
 import { Empty } from "@/components/ui/empty"
 import { toast } from "sonner"
 import {
@@ -105,7 +110,9 @@ const spreadsheetAmountInputClass =
   "h-8 w-24 rounded-sm border-0 border-r border-b bg-transparent px-1 py-1 text-right text-[10px] shadow-none outline-none focus-visible:bg-transparent focus-visible:ring-0 focus-visible:outline-[3px] focus-visible:outline-offset-[-3px] focus-visible:outline-blue-500 dark:bg-transparent dark:focus-visible:bg-transparent"
 
 const transactionCheckboxClass =
-  "size-3 appearance-none align-middle border border-border/40 bg-background checked:border-primary checked:bg-primary"
+  "size-3 appearance-none align-middle border border-border/70 bg-card checked:border-primary checked:bg-primary dark:border-zinc-500 dark:checked:border-zinc-200 dark:checked:bg-zinc-200"
+
+type StatusFilter = "flagged" | "archived" | "waived"
 
 const defaultNewRow = (sourceAccounts: Account[], allAccounts = sourceAccounts): NewRowForm => ({
   date: new Date().toISOString().slice(0, 10),
@@ -210,7 +217,8 @@ type AccountComboboxProps = {
   onChange: (nextId: string) => void
   onKeyDown?: (event: KeyboardEvent) => void
   excludeId?: string
-  createAccount: (name: string) => Promise<Account | null>
+  createAccount?: (name: string) => Promise<Account | null>
+  placeholder?: string
 }
 
 function AccountCombobox({
@@ -220,6 +228,7 @@ function AccountCombobox({
   onKeyDown,
   excludeId,
   createAccount,
+  placeholder = "Search account...",
 }: AccountComboboxProps) {
   const [query, setQuery] = useState("")
   const [selectedId, setSelectedId] = useState(value)
@@ -260,6 +269,7 @@ function AccountCombobox({
       : HouseIcon
     : HouseIcon
   const canCreate =
+    Boolean(createAccount) &&
     normalizedQuery.length > 0 &&
     !availableAccounts.some(
       (account) =>
@@ -269,6 +279,7 @@ function AccountCombobox({
     )
 
   const handleCreateAccount = async () => {
+    if (!createAccount) return
     const created = await createAccount(query)
     if (!created) return
     setSelectedId(created.id)
@@ -296,7 +307,7 @@ function AccountCombobox({
       }}
     >
       <ComboboxInput
-        placeholder="Search account..."
+        placeholder={placeholder}
         leadingIcon={
           selectedAccount ? (
             <span className="inline-flex size-5 items-center justify-center border bg-muted">
@@ -480,6 +491,7 @@ export function TransactionsPage({
   const [contextActionArmed, setContextActionArmed] = useState(false)
   const [draft, setDraft] = useState<RecordItem | null>(null)
   const [page, setPage] = useState(1)
+  const [pendingOpenRecordId, setPendingOpenRecordId] = useState<string | null>(null)
   const [selectedRecordIds, setSelectedRecordIds] = useState<Set<string>>(() => new Set())
   const cellRefs = useRef<Record<string, HTMLInputElement | null>>({})
   const rowRefs = useRef<Record<string, HTMLTableRowElement | null>>({})
@@ -490,9 +502,12 @@ export function TransactionsPage({
     query: "",
     type: "",
     category: "",
-    account: "",
+    fromAccountId: "",
+    toAccountId: "",
+    direction: "",
     minAmount: "",
     maxAmount: "",
+    statuses: [] as StatusFilter[],
   })
   const [groupBy, setGroupBy] = useState<"none" | "date">("date")
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc")
@@ -505,6 +520,7 @@ export function TransactionsPage({
   >({})
   const [waiveDialogOpen, setWaiveDialogOpen] = useState(false)
   const [waiveDialogRecord, setWaiveDialogRecord] = useState<RecordItem | null>(null)
+  const [waiveDialogRecords, setWaiveDialogRecords] = useState<RecordItem[]>([])
   const [waiveDialogAccountId, setWaiveDialogAccountId] = useState("")
   const [waiveDialogSaving, setWaiveDialogSaving] = useState(false)
   const [splitDialogOpen, setSplitDialogOpen] = useState(false)
@@ -529,6 +545,34 @@ export function TransactionsPage({
       JSON.stringify(flaggedCalendarDates)
     )
   }, [flaggedCalendarDates])
+
+  useEffect(() => {
+    const storedRecordId = sessionStorage.getItem("finance-open-record-id")
+    const recordId = storedRecordId ?? pendingOpenRecordId
+    if (!recordId) return
+    const record = records.find((item) => item.id === recordId)
+    if (!record) {
+      setPendingOpenRecordId(recordId)
+      return
+    }
+    sessionStorage.removeItem("finance-open-record-id")
+    const date = parseDateValue(record.date)
+    if (date) setCalendarRange({ from: date, to: date })
+    setFilters({
+      query: "",
+      type: "",
+      category: "",
+      fromAccountId: "",
+      toAccountId: "",
+      direction: "",
+      minAmount: "",
+      maxAmount: "",
+      statuses: [],
+    })
+    setGroupBy("date")
+    setSelectedRecordIds(new Set([recordId]))
+    setPendingOpenRecordId(recordId)
+  }, [pendingOpenRecordId, records, setCalendarRange])
 
   useEffect(() => {
     setNewRow((current) => ({
@@ -847,7 +891,6 @@ export function TransactionsPage({
 
   const filteredRecords = useMemo(() => {
     const query = filters.query.trim().toLowerCase()
-    const account = filters.account.trim().toLowerCase()
     const type = filters.type.trim().toLowerCase()
     const category = filters.category.trim().toLowerCase()
     const minAmount = filters.minAmount ? Number.parseFloat(filters.minAmount) : null
@@ -865,22 +908,38 @@ export function TransactionsPage({
       const matchesType = !type || record.type.toLowerCase().includes(type)
       const matchesCategory =
         !category || record.category.toLowerCase().includes(category)
-      const matchesAccount =
-        !account ||
-        record.accountFrom.displayName.toLowerCase().includes(account) ||
-        record.payeeTo.displayName.toLowerCase().includes(account)
+      const matchesFromAccount =
+        !filters.fromAccountId || record.accountFrom.id === filters.fromAccountId
+      const matchesToAccount =
+        !filters.toAccountId || record.payeeTo.id === filters.toAccountId
+      const ownershipDirection = getOwnershipDirection(record)
+      const matchesDirection =
+        !filters.direction ||
+        (filters.direction === "incoming" && ownershipDirection === "incoming") ||
+        (filters.direction === "outgoing" && ownershipDirection === "outgoing") ||
+        (filters.direction === "neutral" && ownershipDirection === "neutral")
       const matchesMin = minAmount === null || recordAmount >= minAmount
       const matchesMax = maxAmount === null || recordAmount <= maxAmount
       const matchesRange = isWithinDateFilter(record.date)
+      const matchesStatus =
+        filters.statuses.length === 0 ||
+        filters.statuses.some((status) => {
+          if (status === "flagged") return record.flagged
+          if (status === "archived") return record.archived
+          return Boolean(record.waivedBy)
+        })
 
       return (
         matchesQuery &&
         matchesType &&
         matchesCategory &&
-        matchesAccount &&
+        matchesFromAccount &&
+        matchesToAccount &&
+        matchesDirection &&
         matchesMin &&
         matchesMax &&
-        matchesRange
+        matchesRange &&
+        matchesStatus
       )
     })
   }, [calendarRange, filters, recordsWithBalance])
@@ -954,6 +1013,7 @@ export function TransactionsPage({
     description: record.description,
     category: record.category,
     flagged: record.flagged,
+    archived: record.archived,
   })
 
   const persistRecordIndexes = async (items: RecordItem[]) => {
@@ -1058,6 +1118,23 @@ export function TransactionsPage({
     () => sortedRecords.slice(startIndex, endIndex),
     [endIndex, sortedRecords, startIndex]
   )
+  useEffect(() => {
+    if (!pendingOpenRecordId) return
+    const targetIndex = sortedRecords.findIndex((record) => record.id === pendingOpenRecordId)
+    if (targetIndex < 0) return
+    const targetPage = Math.floor(targetIndex / pageSize) + 1
+    if (currentPage !== targetPage) {
+      setPage(targetPage)
+      return
+    }
+    requestAnimationFrame(() => {
+      rowRefs.current[pendingOpenRecordId]?.scrollIntoView({
+        block: "center",
+        behavior: "smooth",
+      })
+      setPendingOpenRecordId(null)
+    })
+  }, [currentPage, pageSize, pendingOpenRecordId, sortedRecords])
   const isGroupedByDate = !spreadsheetMode && groupBy === "date"
   const visibleColumnCount = 9
   const selectedRecords = useMemo(
@@ -1065,9 +1142,14 @@ export function TransactionsPage({
     [records, selectedRecordIds]
   )
   const selectedCount = selectedRecordIds.size
+  const selectedFilteredCount = filteredRecords.filter((record) =>
+    selectedRecordIds.has(record.id)
+  ).length
   const allFilteredRecordsSelected =
     filteredRecords.length > 0 &&
-    filteredRecords.every((record) => selectedRecordIds.has(record.id))
+    selectedFilteredCount === filteredRecords.length
+  const hasPartialFilteredSelection =
+    selectedFilteredCount > 0 && selectedFilteredCount < filteredRecords.length
 
   useEffect(() => {
     setSelectedRecordIds((current) => {
@@ -1088,17 +1170,26 @@ export function TransactionsPage({
 
   const toggleFilteredSelection = () => {
     setSelectedRecordIds((current) => {
-      const next = new Set(current)
-      if (allFilteredRecordsSelected) {
-        filteredRecords.forEach((record) => next.delete(record.id))
-      } else {
-        filteredRecords.forEach((record) => next.add(record.id))
+      if (current.size > 0) {
+        return new Set()
       }
+      const next = new Set(current)
+      filteredRecords.forEach((record) => next.add(record.id))
       return next
     })
   }
 
   const clearSelection = () => setSelectedRecordIds(new Set())
+
+  const toggleStatusFilter = (status: StatusFilter) => {
+    setFilters((current) => ({
+      ...current,
+      statuses: current.statuses.includes(status)
+        ? current.statuses.filter((item) => item !== status)
+        : [...current.statuses, status],
+    }))
+    setPage(1)
+  }
 
   const bulkSetFlag = async (flagged: boolean) => {
     if (selectedRecords.length === 0) return
@@ -1116,6 +1207,28 @@ export function TransactionsPage({
           )
       )
       toast.success(flagged ? "Transactions flagged" : "Transactions unflagged")
+    } catch {
+      setRecords(previousRecords)
+      toast.error("Failed to update selected transactions")
+    }
+  }
+
+  const bulkSetArchived = async (archived: boolean) => {
+    if (selectedRecords.length === 0) return
+    const previousRecords = records
+    const nextRecords = records.map((record) =>
+      selectedRecordIds.has(record.id) ? { ...record, archived } : record
+    )
+    setRecords(nextRecords)
+    try {
+      await Promise.all(
+        nextRecords
+          .filter((record) => selectedRecordIds.has(record.id))
+          .map((record) =>
+            invoke<RecordApi>("update_record", { payload: recordToPayload(record) })
+          )
+      )
+      toast.success(archived ? "Transactions archived" : "Transactions unarchived")
     } catch {
       setRecords(previousRecords)
       toast.error("Failed to update selected transactions")
@@ -1166,96 +1279,261 @@ export function TransactionsPage({
     })}`
   }
 
-  const getSpendingByView = () => {
-    const now = new Date()
-    const expenseRecords = records.filter(
-      (record) => record.type === "Expense" && !isRefundRecord(record)
+  const amountFilterMax = useMemo(() => {
+    const max = Math.max(
+      0,
+      ...records.map((record) => Math.abs(parseAmount(record.amount)))
     )
-    const map = new Map<string, number>()
+    return Math.max(1, Math.ceil(max))
+  }, [records])
+  const amountFilterMinValue = filters.minAmount
+    ? Math.max(0, Math.min(amountFilterMax, Number.parseFloat(filters.minAmount) || 0))
+    : 0
+  const amountFilterMaxValue = filters.maxAmount
+    ? Math.max(0, Math.min(amountFilterMax, Number.parseFloat(filters.maxAmount) || amountFilterMax))
+    : amountFilterMax
+  const amountSliderValue: [number, number] = [
+    Math.min(amountFilterMinValue, amountFilterMaxValue),
+    Math.max(amountFilterMinValue, amountFilterMaxValue),
+  ]
+  const updateAmountRange = (nextMin: number, nextMax: number) => {
+    const min = Math.max(0, Math.min(amountFilterMax, nextMin))
+    const max = Math.max(0, Math.min(amountFilterMax, nextMax))
+    setFilters((current) => ({
+      ...current,
+      minAmount: min <= 0 ? "" : min.toFixed(2),
+      maxAmount: max >= amountFilterMax ? "" : max.toFixed(2),
+    }))
+    setPage(1)
+  }
 
-    const add = (label: string, value: number) => {
-      map.set(label, (map.get(label) ?? 0) + value)
-    }
+  const spendingSliceColors = [
+    "oklch(0.58 0.18 28)",
+    "oklch(0.62 0.16 80)",
+    "oklch(0.58 0.17 145)",
+    "oklch(0.58 0.17 210)",
+    "oklch(0.6 0.18 285)",
+    "oklch(0.62 0.16 335)",
+    "oklch(0.52 0.14 250)",
+    "oklch(0.62 0.12 35)",
+  ]
+  const chartDataKey = (value: string) =>
+    `category_${value.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "uncategorized"}`
 
-    expenseRecords.forEach((record) => {
-      const d = parseDateValue(record.date)
-      if (!d) return
-      const value = Math.abs(parseAmount(record.amount))
-      if (spendingView === "yearly") add(`${d.getFullYear()}`, value)
-      if (spendingView === "monthly")
-        add(d.toLocaleString(undefined, { month: "short" }), value)
-      if (spendingView === "weekly") {
-        const start = new Date(d)
-        start.setDate(d.getDate() - d.getDay())
-        add(
-          `${start.toLocaleString(undefined, { month: "short" })} ${start.getDate()}`,
-          value
-        )
-      }
-      if (spendingView === "daily")
-        add(d.toLocaleString(undefined, { month: "short", day: "numeric" }), value)
-    })
-
-    let labels: string[] = []
+  const getSpendingPeriodLabels = () => {
+    const now = new Date()
     if (spendingView === "yearly") {
-      labels = Array.from({ length: 5 }, (_, i) => `${now.getFullYear() - 4 + i}`)
-    } else if (spendingView === "monthly") {
-      labels = Array.from({ length: 6 }, (_, i) => {
+      return Array.from({ length: 5 }, (_, i) => `${now.getFullYear() - 4 + i}`)
+    }
+    if (spendingView === "monthly") {
+      return Array.from({ length: 6 }, (_, i) => {
         const dt = new Date(now.getFullYear(), now.getMonth() - (5 - i), 1)
         return dt.toLocaleString(undefined, { month: "short" })
       })
-    } else if (spendingView === "weekly") {
-      labels = Array.from({ length: 6 }, (_, i) => {
+    }
+    if (spendingView === "weekly") {
+      return Array.from({ length: 6 }, (_, i) => {
         const dt = new Date(now)
         dt.setDate(now.getDate() - (5 - i) * 7)
         const start = new Date(dt)
         start.setDate(dt.getDate() - dt.getDay())
         return `${start.toLocaleString(undefined, { month: "short" })} ${start.getDate()}`
       })
-    } else {
-      labels = Array.from({ length: 6 }, (_, i) => {
-        const dt = new Date(now)
-        dt.setDate(now.getDate() - (5 - i))
-        return dt.toLocaleString(undefined, { month: "short", day: "numeric" })
+    }
+    return Array.from({ length: 6 }, (_, i) => {
+      const dt = new Date(now)
+      dt.setDate(now.getDate() - (5 - i))
+      return dt.toLocaleString(undefined, { month: "short", day: "numeric" })
+    })
+  }
+
+  const getSpendingPeriodLabel = (date: Date) => {
+    if (spendingView === "yearly") return `${date.getFullYear()}`
+    if (spendingView === "monthly")
+      return date.toLocaleString(undefined, { month: "short" })
+    if (spendingView === "weekly") {
+      const start = new Date(date)
+      start.setDate(date.getDate() - date.getDay())
+      return `${start.toLocaleString(undefined, { month: "short" })} ${start.getDate()}`
+    }
+    return date.toLocaleString(undefined, { month: "short", day: "numeric" })
+  }
+
+  const spendingOverview = useMemo(() => {
+    const categoryLabels = new Map(
+      categories.map((category) => [category.name, category.displayName])
+    )
+    const labels = getSpendingPeriodLabels()
+    const labelSet = new Set(labels)
+    const spendingByPeriod = new Map<string, Map<string, number>>()
+    const categoryTotals = new Map<string, number>()
+
+    records
+      .filter((record) => record.type === "Expense" && !isRefundRecord(record))
+      .forEach((record) => {
+        const date = parseDateValue(record.date)
+        if (!date) return
+        const period = getSpendingPeriodLabel(date)
+        if (!labelSet.has(period)) return
+        const value = Math.abs(parseAmount(record.amount))
+        const periodMap = spendingByPeriod.get(period) ?? new Map<string, number>()
+        periodMap.set(record.category, (periodMap.get(record.category) ?? 0) + value)
+        spendingByPeriod.set(period, periodMap)
+        categoryTotals.set(record.category, (categoryTotals.get(record.category) ?? 0) + value)
+      })
+
+    const totalSpending = Array.from(categoryTotals.values()).reduce(
+      (total, value) => total + value,
+      0
+    )
+    const sortedCategoryTotals = Array.from(categoryTotals.entries()).sort(([, a], [, b]) => b - a)
+    const smallCategories = new Set(
+      totalSpending > 0
+        ? sortedCategoryTotals
+            .filter(([, total]) => total / totalSpending < 0.05)
+            .map(([category]) => category)
+        : []
+    )
+    const hasOtherSegment = smallCategories.size > 0
+
+    const categorySegments = sortedCategoryTotals
+      .filter(([category]) => !smallCategories.has(category))
+      .sort(([, a], [, b]) => b - a)
+      .map(([category], index) => ({
+        key: chartDataKey(category),
+        category,
+        label: categoryLabels.get(category) ?? category,
+        fill: spendingSliceColors[index % spendingSliceColors.length],
+      }))
+    if (hasOtherSegment) {
+      categorySegments.push({
+        key: "category_other_aggregated",
+        category: "Other",
+        label: "Other",
+        fill: "oklch(0.48 0.02 250)",
       })
     }
 
-    const values = labels.map((label) => map.get(label) ?? 0)
-    const max = Math.max(...values, 1)
-    return { labels, values, max }
-  }
+    const data = labels.map((period) => {
+      const row: Record<string, number | string> = { period }
+      const periodMap = spendingByPeriod.get(period)
+      categorySegments.forEach((segment) => {
+        row[segment.key] =
+          segment.key === "category_other_aggregated"
+            ? Array.from(smallCategories).reduce(
+                (total, category) => total + (periodMap?.get(category) ?? 0),
+                0
+              )
+            : periodMap?.get(segment.category) ?? 0
+      })
+      return row
+    })
 
-  const spendingData = useMemo(() => {
-    const spending = getSpendingByView()
-    return spending.labels.map((label, index) => ({
-      period: label,
-      value: spending.values[index] ?? 0,
-    }))
-  }, [records, spendingView])
-  const spendingChartConfig = {
-    value: {
-      label: "Spending",
+    return { data, categorySegments }
+  }, [categories, records, spendingView])
+  const spendingChartConfig = Object.fromEntries(
+    spendingOverview.categorySegments.map((segment) => [
+      segment.key,
+      {
+        label: segment.label,
+        color: segment.fill,
+      },
+    ])
+  ) as ChartConfig
+
+  const balanceData = useMemo(() => {
+    const balanceByDate = filteredRecords.reduce<Record<string, number>>((acc, record) => {
+      acc[record.date] = record.runningBalance
+      return acc
+    }, {})
+    return Object.entries(balanceByDate)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([date, balance]) => ({
+        period: date.slice(5),
+        balance,
+        positiveBalance: balance > 0 ? balance : 0,
+      }))
+  }, [filteredRecords])
+  const balanceIncomeMarkers = useMemo(
+    () =>
+      filteredRecords
+        .filter((record) => {
+          const category = record.category.trim().toLowerCase()
+          return (
+            (category === "salary" || category === "allowance") &&
+            !record.waivedBy &&
+            displaySignedAmount(record) > 0
+          )
+        })
+        .map((record) => ({
+          id: record.id,
+          period: record.date.slice(5),
+          label: record.category,
+        })),
+    [filteredRecords, displayCurrency, rateByFromCurrency, currentUserEmail]
+  )
+  const balanceChartConfig = {
+    balance: {
+      label: "Balance",
       color: "oklch(0.55 0 0)",
     },
   } satisfies ChartConfig
 
-  const lineData = useMemo(() => {
-    const groupedDaily = filteredRecords.reduce<Record<string, number>>((acc, record) => {
-      acc[record.date] = (acc[record.date] ?? 0) + signedAmount(record)
+  const categorySliceColors = [
+    "oklch(0.58 0.18 28)",
+    "oklch(0.62 0.16 80)",
+    "oklch(0.58 0.17 145)",
+    "oklch(0.58 0.17 210)",
+    "oklch(0.6 0.18 285)",
+    "oklch(0.62 0.16 335)",
+  ]
+  const shortenCategoryLabel = (value: string) => {
+    if (value.length <= 14) return value
+    return `${value.slice(0, 12).trim()}...`
+  }
+  const categorySpendingData = useMemo(() => {
+    const categoryLabels = new Map(
+      categories.map((category) => [category.name, category.displayName])
+    )
+    const netByCategory = filteredRecords.reduce<Record<string, number>>((acc, record) => {
+      if (record.type === "Transfer") return acc
+      acc[record.category] = (acc[record.category] ?? 0) + displaySignedAmount(record)
       return acc
     }, {})
-    return Object.entries(groupedDaily)
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([date, amount]) => ({
-        period: date.slice(5),
-        amount,
-        pos: amount > 0 ? amount : 0,
-        neg: amount < 0 ? amount : 0,
+
+    const rawSlices = Object.entries(netByCategory)
+      .filter(([, net]) => net < 0)
+      .sort(([, a], [, b]) => a - b)
+      .map(([category, net], index) => ({
+        category: categoryLabels.get(category) ?? category,
+        shortCategory: shortenCategoryLabel(categoryLabels.get(category) ?? category),
+        spending: Math.abs(net),
+        fill: categorySliceColors[index % categorySliceColors.length],
       }))
-  }, [filteredRecords, currentUserEmail])
-  const lineChartConfig = {
-    amount: {
-      label: "Net Flow",
+
+    const totalSpending = rawSlices.reduce((total, item) => total + item.spending, 0)
+    if (totalSpending <= 0) return []
+
+    const visibleSlices = rawSlices.filter((item) => item.spending / totalSpending >= 0.05)
+    const otherSpending = rawSlices
+      .filter((item) => item.spending / totalSpending < 0.05)
+      .reduce((total, item) => total + item.spending, 0)
+
+    return otherSpending > 0
+      ? [
+          ...visibleSlices,
+          {
+            category: "Other",
+            shortCategory: "Other",
+            spending: otherSpending,
+            fill: "oklch(0.48 0.02 250)",
+          },
+        ]
+      : visibleSlices
+  }, [categories, filteredRecords, displayCurrency, rateByFromCurrency, currentUserEmail])
+  const categorySpendingChartConfig = {
+    spending: {
+      label: "Net Spending",
       color: "oklch(0.55 0 0)",
     },
   } satisfies ChartConfig
@@ -1368,6 +1646,29 @@ export function TransactionsPage({
     }
   }
 
+  const toggleRecordArchive = async (record: RecordItem) => {
+    const nextRecord = { ...record, archived: !record.archived }
+    setRecords((current) =>
+      current.map((item) => (item.id === nextRecord.id ? nextRecord : item))
+    )
+
+    try {
+      const updatedApi = await invoke<RecordApi>("update_record", {
+        payload: recordToPayload(nextRecord),
+      })
+      const updatedRecord = mapRecordFromApi(updatedApi, accounts) ?? nextRecord
+      setRecords((current) =>
+        current.map((item) => (item.id === updatedRecord.id ? updatedRecord : item))
+      )
+      window.dispatchEvent(new CustomEvent("record:update", { detail: updatedRecord }))
+    } catch {
+      setRecords((current) =>
+        current.map((item) => (item.id === record.id ? record : item))
+      )
+      toast.error("Failed to update archive")
+    }
+  }
+
   const confirmDeleteRecord = async () => {
     if (!deleteDialogRecord) return
 
@@ -1473,6 +1774,7 @@ export function TransactionsPage({
       description: committedNewRow.description.trim(),
       category: lockedCategory,
       flagged: false,
+      archived: false,
     }
   }
 
@@ -1500,6 +1802,7 @@ export function TransactionsPage({
           description: nextRecord.description,
           category: nextRecord.category,
           flagged: nextRecord.flagged,
+          archived: nextRecord.archived,
         },
       })
       created = mapRecordFromApi(createdApi, accounts)
@@ -1599,7 +1902,7 @@ export function TransactionsPage({
       id: `acc-local-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
       displayName: trimmed,
       accountName: trimmed.split(/\s+/).slice(0, 3).join(" "),
-      ownerEmail: side === "accountFromId" ? currentUserEmail : null,
+      ownerEmail: null,
       defaultCategory: null,
     }
     setAccounts((current) => [...current, created])
@@ -1641,7 +1944,26 @@ export function TransactionsPage({
     )
   }
 
-  const applyWaiveAccount = async (record: RecordItem, waivedAccountId: string) => {
+  const openWaiveDialog = (recordsToWaive: RecordItem[]) => {
+    const [firstRecord] = recordsToWaive
+    if (!firstRecord) return
+    setWaiveDialogRecord(firstRecord)
+    setWaiveDialogRecords(recordsToWaive)
+    const sameWaiveAccount = recordsToWaive.every(
+      (record) => record.waivedBy?.id === firstRecord.waivedBy?.id
+    )
+    setWaiveDialogAccountId(sameWaiveAccount ? firstRecord.waivedBy?.id ?? "" : "")
+    setWaiveDialogOpen(true)
+  }
+
+  const closeWaiveDialog = () => {
+    setWaiveDialogOpen(false)
+    setWaiveDialogRecord(null)
+    setWaiveDialogRecords([])
+    setWaiveDialogAccountId("")
+  }
+
+  const applyWaiveAccount = async (recordsToWaive: RecordItem[], waivedAccountId: string) => {
     const waivedAccount =
       waivedAccountId.trim().length > 0
         ? accounts.find((item) => item.id === waivedAccountId.trim()) ?? null
@@ -1650,20 +1972,37 @@ export function TransactionsPage({
       toast.error("Account not found")
       return
     }
-    const nextRecord = { ...record, waivedBy: waivedAccount }
+    if (recordsToWaive.length === 0) return
+    const previousRecords = records
+    const nextRecords = recordsToWaive.map((record) => ({ ...record, waivedBy: waivedAccount }))
+    const nextRecordById = new Map(nextRecords.map((record) => [record.id, record]))
     setWaiveDialogSaving(true)
+    setRecords((current) =>
+      current.map((item) => nextRecordById.get(item.id) ?? item)
+    )
     try {
-      await invoke<RecordApi>("update_record", {
-        payload: recordToPayload(nextRecord),
-      })
-      setRecords((current) =>
-        current.map((item) => (item.id === nextRecord.id ? nextRecord : item))
+      const updatedApis = await Promise.all(
+        nextRecords.map((record) =>
+          invoke<RecordApi>("update_record", {
+            payload: recordToPayload(record),
+          })
+        )
       )
-      toast.success(nextRecord.waivedBy ? "Waive updated" : "Waive cleared")
-      setWaiveDialogOpen(false)
-      setWaiveDialogRecord(null)
-      setWaiveDialogAccountId("")
+      const updatedRecords = updatedApis
+        .map((row) => mapRecordFromApi(row, accounts))
+        .filter((record): record is RecordItem => record !== null)
+      const updatedById = new Map(updatedRecords.map((record) => [record.id, record]))
+      setRecords((current) =>
+        current.map((item) => updatedById.get(item.id) ?? item)
+      )
+      toast.success(
+        waivedAccount
+          ? `${nextRecords.length} transaction${nextRecords.length === 1 ? "" : "s"} waived`
+          : `${nextRecords.length} waive${nextRecords.length === 1 ? "" : "s"} cleared`
+      )
+      closeWaiveDialog()
     } catch {
+      setRecords(previousRecords)
       toast.error("Failed to update waive")
     } finally {
       setWaiveDialogSaving(false)
@@ -1727,6 +2066,7 @@ export function TransactionsPage({
         description: splitDialogRecord.description,
         category: splitDialogRecord.category,
         flagged: splitDialogRecord.flagged,
+        archived: splitDialogRecord.archived,
       }
       const updatedApi = await invoke<RecordApi>("update_record", { payload: firstPayload })
       const createdItems: RecordItem[] = []
@@ -1745,6 +2085,7 @@ export function TransactionsPage({
             description: splitDialogRecord.description,
             category: splitDialogRecord.category,
             flagged: splitDialogRecord.flagged,
+            archived: splitDialogRecord.archived,
           },
         })
         const mapped = mapRecordFromApi(createdApi, accounts)
@@ -1909,34 +2250,185 @@ export function TransactionsPage({
                 }}
                 className="h-8 text-xs"
               />
-              <Input
-                placeholder="Account"
-                value={filters.account}
-                onChange={(event) => {
-                  setFilters((current) => ({ ...current, account: event.target.value }))
-                  setPage(1)
-                }}
-                className="h-8 text-xs"
-              />
-              <div className="grid grid-cols-2 gap-2">
-                <Input
-                  placeholder="Min amount"
-                  value={filters.minAmount}
-                  onChange={(event) => {
-                    setFilters((current) => ({ ...current, minAmount: event.target.value }))
-                    setPage(1)
+              <div className="grid grid-cols-3 gap-1.5">
+                {([
+                  {
+                    value: "incoming",
+                    label: "Incoming",
+                    icon: ArrowDownLeftIcon,
+                    className: "text-green-700 dark:text-green-300",
+                    activeClassName: "border-green-800/30 bg-green-950/10 dark:bg-green-950/30",
+                  },
+                  {
+                    value: "outgoing",
+                    label: "Outgoing",
+                    icon: ArrowUpRightIcon,
+                    className: "text-red-700 dark:text-red-300",
+                    activeClassName: "border-red-900/30 bg-red-950/10 dark:bg-red-950/30",
+                  },
+                  {
+                    value: "neutral",
+                    label: "Neutral",
+                    icon: ArrowsLeftRightIcon,
+                    className: "text-muted-foreground",
+                    activeClassName: "border-foreground/20 bg-muted",
+                  },
+                ]).map((item) => {
+                  const Icon = item.icon
+                  const checked = filters.direction === item.value
+                  return (
+                    <button
+                      key={item.value}
+                      type="button"
+                      aria-pressed={checked}
+                      onClick={() => {
+                        setFilters((current) => ({
+                          ...current,
+                          direction: current.direction === item.value ? "" : item.value,
+                        }))
+                        setPage(1)
+                      }}
+                      className={`flex h-8 items-center justify-center gap-1.5 border text-[10px] hover:bg-muted ${
+                        checked ? item.activeClassName : "border-border bg-card"
+                      }`}
+                    >
+                      <Icon className={`size-3.5 ${item.className}`} />
+                      <span>{item.label}</span>
+                    </button>
+                  )
+                })}
+              </div>
+              <div className="grid gap-2">
+                <div className="grid grid-cols-[1fr_auto] gap-1.5">
+                  <AccountCombobox
+                    accounts={accounts}
+                    value={filters.fromAccountId}
+                    placeholder="From account..."
+                    onChange={(nextId) => {
+                      setFilters((current) => ({ ...current, fromAccountId: nextId }))
+                      setPage(1)
+                    }}
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-7 rounded-none px-2 text-[10px]"
+                    disabled={!filters.fromAccountId}
+                    onClick={() => {
+                      setFilters((current) => ({ ...current, fromAccountId: "" }))
+                      setPage(1)
+                    }}
+                  >
+                    Clear
+                  </Button>
+                </div>
+                <div className="grid grid-cols-[1fr_auto] gap-1.5">
+                  <AccountCombobox
+                    accounts={accounts}
+                    value={filters.toAccountId}
+                    placeholder="To account..."
+                    onChange={(nextId) => {
+                      setFilters((current) => ({ ...current, toAccountId: nextId }))
+                      setPage(1)
+                    }}
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-7 rounded-none px-2 text-[10px]"
+                    disabled={!filters.toAccountId}
+                    onClick={() => {
+                      setFilters((current) => ({ ...current, toAccountId: "" }))
+                      setPage(1)
+                    }}
+                  >
+                    Clear
+                  </Button>
+                </div>
+              </div>
+              <div className="grid grid-cols-3 gap-1.5">
+                {([
+                  {
+                    value: "flagged" as const,
+                    label: "Flagged",
+                    icon: FlagIcon,
+                    className: "text-red-800 dark:text-red-300",
+                    activeClassName: "border-red-900/30 bg-red-950/10 dark:bg-red-950/30",
+                  },
+                  {
+                    value: "archived" as const,
+                    label: "Archived",
+                    icon: ArchiveBoxIcon,
+                    className: "text-yellow-700 dark:text-yellow-300",
+                    activeClassName: "border-yellow-700/30 bg-yellow-100 dark:bg-yellow-950/40",
+                  },
+                  {
+                    value: "waived" as const,
+                    label: "Waived",
+                    icon: BankIcon,
+                    className: "text-blue-800 dark:text-blue-300",
+                    activeClassName: "border-blue-900/30 bg-blue-950/10 dark:bg-blue-950/30",
+                  },
+                ]).map((item) => {
+                  const Icon = item.icon
+                  const checked = filters.statuses.includes(item.value)
+                  return (
+                    <button
+                      key={item.value}
+                      type="button"
+                      aria-pressed={checked}
+                      onClick={() => toggleStatusFilter(item.value)}
+                      className={`flex h-8 items-center justify-center gap-1.5 border text-[10px] hover:bg-muted ${
+                        checked ? item.activeClassName : "border-border bg-card"
+                      }`}
+                    >
+                      <Icon className={`size-3.5 ${item.className}`} weight={checked ? "fill" : "regular"} />
+                      <span>{item.label}</span>
+                    </button>
+                  )
+                })}
+              </div>
+              <div className="grid gap-3 pt-1">
+                <Slider
+                  min={0}
+                  max={amountFilterMax}
+                  step={1}
+                  value={amountSliderValue}
+                  onValueChange={(value) => {
+                    const [nextMin = 0, nextMax = amountFilterMax] = value
+                    updateAmountRange(nextMin, nextMax)
                   }}
-                  className="h-8 text-xs"
                 />
-                <Input
-                  placeholder="Max amount"
-                  value={filters.maxAmount}
-                  onChange={(event) => {
-                    setFilters((current) => ({ ...current, maxAmount: event.target.value }))
-                    setPage(1)
-                  }}
-                  className="h-8 text-xs"
-                />
+                <div className="grid grid-cols-2 gap-2">
+                  <Input
+                    placeholder="Min amount"
+                    type="number"
+                    min={0}
+                    max={amountFilterMax}
+                    value={filters.minAmount}
+                    onChange={(event) => {
+                      const nextMin = event.target.value ? Number.parseFloat(event.target.value) : 0
+                      updateAmountRange(nextMin, amountSliderValue[1])
+                    }}
+                    className="h-8 text-xs"
+                  />
+                  <Input
+                    placeholder="Max amount"
+                    type="number"
+                    min={0}
+                    max={amountFilterMax}
+                    value={filters.maxAmount}
+                    onChange={(event) => {
+                      const nextMax = event.target.value
+                        ? Number.parseFloat(event.target.value)
+                        : amountFilterMax
+                      updateAmountRange(amountSliderValue[0], nextMax)
+                    }}
+                    className="h-8 text-xs"
+                  />
+                </div>
               </div>
             </div>
           </PopoverContent>
@@ -1980,7 +2472,7 @@ export function TransactionsPage({
           {sortDirection === "desc" ? "Newest first" : "Oldest first"}
         </Button>
       </div>
-      <div className="flex w-full flex-col gap-4 lg:grid lg:grid-cols-2">
+      <div className="flex w-full flex-col gap-4 lg:grid lg:grid-cols-3">
         <div className="hidden overflow-hidden border-y bg-card p-4 lg:block lg:border">
           <div className="mb-2 flex items-center justify-between">
             <h2 className="text-lg font-semibold leading-none tracking-tight">
@@ -2003,59 +2495,141 @@ export function TransactionsPage({
             ))}
           </div>
           <ChartContainer config={spendingChartConfig} className="h-44 w-full border p-2">
-            <BarChart data={spendingData} margin={{ top: 8, right: 8, left: 8, bottom: 0 }}>
+            <BarChart data={spendingOverview.data} margin={{ top: 8, right: 8, left: 8, bottom: 0 }}>
               <CartesianGrid vertical={false} strokeDasharray="3 3" />
               <XAxis dataKey="period" tickLine={false} axisLine={false} tickMargin={6} />
               <ChartTooltip
                 content={
                   <ChartTooltipContent
-                    formatter={(value) => (
-                      <span>{`Spending ${Number(value).toLocaleString()}`}</span>
+                    formatter={(value, name) => (
+                      <span>
+                        {`${spendingOverview.categorySegments.find((segment) => segment.key === name)?.label ?? name} ${formatMoney(Number(value))}`}
+                      </span>
                     )}
                   />
                 }
               />
-              <Bar dataKey="value" fill="var(--color-value)" radius={0} />
+              {spendingOverview.categorySegments.map((segment) => (
+                <Bar
+                  key={segment.key}
+                  dataKey={segment.key}
+                  stackId="spending"
+                  fill={segment.fill}
+                  radius={0}
+                />
+              ))}
             </BarChart>
           </ChartContainer>
         </div>
         <div className="w-full border-y bg-card p-4 md:col-span-1 md:border">
           <div className="mb-4">
-            <h2 className="text-lg font-semibold leading-none tracking-tight">Spending</h2>
-            <p className="mt-1 text-xs text-muted-foreground">6-month category history.</p>
+            <h2 className="text-lg font-semibold leading-none tracking-tight">Balance</h2>
+            <p className="mt-1 text-xs text-muted-foreground">Current balance over the selected range.</p>
           </div>
           <div className="border-t pt-4">
-            <ChartContainer config={lineChartConfig} className="h-44 w-full">
-              <AreaChart data={lineData} margin={{ top: 8, right: 8, left: 8, bottom: 0 }}>
+            <ChartContainer config={balanceChartConfig} className="h-44 w-full">
+              <AreaChart data={balanceData} margin={{ top: 8, right: 8, left: 8, bottom: 0 }}>
                 <defs>
-                  <linearGradient id="tx-positive" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="#15803d" stopOpacity={0.35} />
-                    <stop offset="100%" stopColor="#15803d" stopOpacity={0.05} />
-                  </linearGradient>
-                  <linearGradient id="tx-negative" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="#b91c1c" stopOpacity={0.35} />
-                    <stop offset="100%" stopColor="#b91c1c" stopOpacity={0.05} />
+                  <linearGradient id="balance-positive-fill" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#22c55e" stopOpacity={0.3} />
+                    <stop offset="100%" stopColor="#22c55e" stopOpacity={0.03} />
                   </linearGradient>
                 </defs>
                 <CartesianGrid vertical={false} strokeDasharray="3 3" />
                 <XAxis dataKey="period" tickLine={false} axisLine={false} />
+                <YAxis hide domain={["auto", "auto"]} />
                 <ChartTooltip
                   content={
                     <ChartTooltipContent
-                      formatter={(value, name) => (
-                        <span>{`${name} ${Number(value).toLocaleString()}`}</span>
+                      formatter={(value) => (
+                        <span>{`Balance ${formatMoney(Number(value))}`}</span>
                       )}
                     />
                   }
                 />
-                <Area type="monotone" dataKey="pos" stroke="none" fill="url(#tx-positive)" />
-                <Area type="monotone" dataKey="neg" stroke="none" fill="url(#tx-negative)" />
-                <Line type="monotone" dataKey="amount" stroke="#d4d4d8" strokeOpacity={0.55} strokeWidth={2} dot={false} />
+                <Area
+                  type="monotone"
+                  dataKey="positiveBalance"
+                  stroke="none"
+                  fill="url(#balance-positive-fill)"
+                  isAnimationActive={false}
+                />
+                <Line
+                  type="monotone"
+                  dataKey="balance"
+                  stroke="var(--color-balance)"
+                  strokeWidth={2}
+                  dot={false}
+                />
+                {balanceIncomeMarkers.map((marker) => (
+                  <ReferenceLine
+                    key={marker.id}
+                    x={marker.period}
+                    stroke="#22c55e"
+                    strokeOpacity={0.82}
+                    strokeWidth={2.5}
+                    strokeDasharray="4 3"
+                  />
+                ))}
               </AreaChart>
             </ChartContainer>
           </div>
         </div>
-        <div className="w-full overflow-hidden border-y bg-card p-4 md:border lg:col-span-2">
+        <div className="w-full border-y bg-card p-4 md:col-span-1 md:border">
+          <div className="mb-4">
+            <h2 className="text-lg font-semibold leading-none tracking-tight">Categories</h2>
+            <p className="mt-1 text-xs text-muted-foreground">Net spending in the selected range.</p>
+          </div>
+          <div className="border-t pt-4">
+            {categorySpendingData.length > 0 ? (
+              <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_120px] xl:items-center">
+                <ChartContainer config={categorySpendingChartConfig} className="h-44 w-full">
+                  <PieChart>
+                    <ChartTooltip
+                      content={
+                        <ChartTooltipContent
+                          hideLabel
+                          nameKey="category"
+                          formatter={(value, name) => (
+                            <span>
+                              {`${name}: ${formatMoney(Number(value))}`}
+                            </span>
+                          )}
+                        />
+                      }
+                    />
+                    <Pie
+                      data={categorySpendingData}
+                      dataKey="spending"
+                      nameKey="category"
+                      innerRadius={38}
+                      outerRadius={72}
+                      paddingAngle={2}
+                    />
+                  </PieChart>
+                </ChartContainer>
+                <div className="grid gap-1.5 text-xs">
+                  {categorySpendingData.slice(0, 5).map((item) => (
+                    <div key={item.category} className="flex items-center gap-2">
+                      <span
+                        className="size-2.5 shrink-0"
+                        style={{ backgroundColor: item.fill }}
+                      />
+                      <span className="min-w-0 flex-1 truncate" title={item.category}>
+                        {item.shortCategory}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <div className="flex h-44 items-center justify-center border text-xs text-muted-foreground">
+                No net spending for this range.
+              </div>
+            )}
+          </div>
+        </div>
+        <div className="w-full overflow-hidden border-y bg-card p-4 md:border lg:col-span-3">
           <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-center">
             <div className="flex flex-col items-center gap-2">
               <div className="flex w-56 items-center border">
@@ -2200,32 +2774,49 @@ export function TransactionsPage({
       <div className="mt-4 grid gap-2">
         <div className="w-full border-y bg-card px-3 py-2 text-xs md:border md:px-4">
           <div className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              checked={allFilteredRecordsSelected}
-              onChange={toggleFilteredSelection}
-              aria-label={
-                allFilteredRecordsSelected
-                  ? "Deselect filtered transactions"
-                  : "Select filtered transactions"
-              }
-              className={transactionCheckboxClass}
-            />
-            <span className={selectedCount > 0 ? "font-medium" : "text-muted-foreground"}>
-              {selectedCount > 0 ? `${selectedCount} selected` : "Select all"}
-            </span>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="h-7 rounded-none px-2 text-xs"
-                  disabled={selectedCount === 0}
-                >
-                  Actions
-                </Button>
-              </DropdownMenuTrigger>
+            <div className="inline-flex h-8 overflow-hidden border bg-card">
+              <button
+                type="button"
+                onClick={toggleFilteredSelection}
+                aria-label={
+                  selectedCount > 0
+                    ? "Deselect selected transactions"
+                    : "Select filtered transactions"
+                }
+                aria-checked={
+                  allFilteredRecordsSelected
+                    ? true
+                    : hasPartialFilteredSelection || selectedCount > 0
+                      ? "mixed"
+                      : false
+                }
+                role="checkbox"
+                className="inline-flex w-9 items-center justify-center hover:bg-muted"
+              >
+                <span className="inline-flex size-3.5 items-center justify-center border border-border/60 bg-background dark:border-zinc-400 dark:bg-zinc-200 dark:text-zinc-950">
+                  {allFilteredRecordsSelected ? (
+                    <CheckIcon className="size-3" weight="bold" />
+                  ) : hasPartialFilteredSelection || selectedCount > 0 ? (
+                    <MinusIcon className="size-3" weight="bold" />
+                  ) : null}
+                </span>
+              </button>
+              <div className="flex min-w-28 items-center border-l px-3 text-xs">
+                <span className={selectedCount > 0 ? "font-medium" : "text-muted-foreground"}>
+                  {selectedCount > 0 ? `${selectedCount} selected` : "Select all"}
+                </span>
+              </div>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <button
+                    type="button"
+                    className="inline-flex w-9 items-center justify-center border-l hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40"
+                    disabled={selectedCount === 0}
+                    aria-label="Selection actions"
+                  >
+                    <CaretDownIcon className="size-3.5" />
+                  </button>
+                </DropdownMenuTrigger>
               <DropdownMenuContent align="start" className="w-36 rounded-none">
                 <DropdownMenuItem
                   disabled={selectedCount !== 1}
@@ -2250,13 +2841,34 @@ export function TransactionsPage({
                 </DropdownMenuItem>
                 <DropdownMenuItem
                   disabled={selectedCount === 0}
+                  onSelect={() => {
+                    openWaiveDialog(selectedRecords)
+                  }}
+                >
+                  Waive
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  disabled={selectedCount === 0}
+                  onSelect={() => void bulkSetArchived(true)}
+                >
+                  Archive
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  disabled={selectedCount === 0}
+                  onSelect={() => void bulkSetArchived(false)}
+                >
+                  Unarchive
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  disabled={selectedCount === 0}
                   variant="destructive"
                   onSelect={() => void bulkDeleteSelected()}
                 >
                   Delete
                 </DropdownMenuItem>
               </DropdownMenuContent>
-            </DropdownMenu>
+              </DropdownMenu>
+            </div>
             {selectedCount > 0 ? (
               <Button
                 type="button"
@@ -2371,6 +2983,14 @@ export function TransactionsPage({
                                 ? "[&_td]:!bg-red-950/10 dark:[&_td]:!bg-red-950/30 [&_td:first-child]:border-l-4 [&_td:first-child]:border-l-red-900"
                                 : ""
                             } ${
+                              record.waivedBy
+                                ? "[&_td]:!bg-blue-950/10 dark:[&_td]:!bg-blue-950/30 [&_td:first-child]:border-l-4 [&_td:first-child]:border-l-blue-800 dark:[&_td:first-child]:border-l-blue-400"
+                                : ""
+                            } ${
+                              record.archived
+                                ? "text-muted-foreground [&_td]:!bg-zinc-100/80 dark:[&_td]:!bg-zinc-900/70 [&_td:last-child]:relative [&_td:last-child]:after:absolute [&_td:last-child]:after:right-0 [&_td:last-child]:after:top-0 [&_td:last-child]:after:h-0 [&_td:last-child]:after:w-0 [&_td:last-child]:after:border-l-[13px] [&_td:last-child]:after:border-t-[13px] [&_td:last-child]:after:border-l-transparent [&_td:last-child]:after:border-t-yellow-200 dark:[&_td:last-child]:after:border-t-yellow-700"
+                                : ""
+                            } ${
                               dragSnapshot.isDragging
                                 ? "relative z-50 bg-card opacity-90 shadow-2xl ring-2 ring-blue-500"
                                 : ""
@@ -2407,7 +3027,7 @@ export function TransactionsPage({
                               className={`inline-flex size-5 items-center justify-center ${
                                 record.flagged
                                   ? "text-red-900 dark:text-red-300"
-                                  : "text-muted-foreground hover:text-foreground"
+                                  : "text-muted-foreground hover:bg-red-950/10 hover:text-red-800 dark:hover:bg-red-950/30 dark:hover:text-red-300"
                               }`}
                               aria-label={record.flagged ? "Unflag transaction" : "Flag transaction"}
                               title={record.flagged ? "Unflag" : "Flag"}
@@ -2418,6 +3038,23 @@ export function TransactionsPage({
                               }}
                             >
                               <FlagIcon className="size-3.5" weight={record.flagged ? "fill" : "regular"} />
+                            </button>
+                            <button
+                              type="button"
+                              className={`inline-flex size-5 items-center justify-center ${
+                                record.archived
+                                  ? "text-muted-foreground hover:bg-yellow-100 hover:text-yellow-800 dark:hover:bg-yellow-950/40 dark:hover:text-yellow-300"
+                                  : "text-muted-foreground hover:bg-yellow-100 hover:text-yellow-800 dark:hover:bg-yellow-950/40 dark:hover:text-yellow-300"
+                              }`}
+                              aria-label={record.archived ? "Unarchive transaction" : "Archive transaction"}
+                              title={record.archived ? "Unarchive" : "Archive"}
+                              onClick={(event) => {
+                                event.preventDefault()
+                                event.stopPropagation()
+                                void toggleRecordArchive(record)
+                              }}
+                            >
+                              <ArchiveBoxIcon className="size-3.5" weight={record.archived ? "fill" : "regular"} />
                             </button>
                           </div>
                         ) : null}
@@ -2463,7 +3100,7 @@ export function TransactionsPage({
                             if (account) updateDraftAccount("accountFrom", account)
                           }}
                           onKeyDown={handleEditKeyDown}
-                          createAccount={(name) => createAccount(name, currentUserEmail)}
+                          createAccount={(name) => createAccount(name)}
                         />
                       ) : (
                         <span className="block truncate text-[11px]">{renderAccountDisplay(record.accountFrom)}</span>
@@ -2634,7 +3271,9 @@ export function TransactionsPage({
                           return (
                             <span
                               className={`inline-flex flex-col items-end leading-none ${
-                                isNeutral
+                                record.waivedBy
+                                  ? "text-blue-700 dark:text-blue-300"
+                                  : isNeutral
                                   ? "text-neutral-500 dark:text-neutral-400"
                                   : isOutgoing
                                   ? "text-red-700 dark:text-red-400"
@@ -2731,9 +3370,7 @@ export function TransactionsPage({
                               event.preventDefault()
                               return
                             }
-                            setWaiveDialogRecord(record)
-                            setWaiveDialogAccountId(record.waivedBy?.id ?? "")
-                            setWaiveDialogOpen(true)
+                            openWaiveDialog([record])
                           }}
                         >
                           {record.waivedBy ? "Edit Waive" : "Waive"}
@@ -2823,7 +3460,7 @@ export function TransactionsPage({
                               }))
                             }}
                             onKeyDown={handleNewRowKeyDown}
-                            createAccount={(name) => createAccount(name, currentUserEmail)}
+                            createAccount={(name) => createAccount(name)}
                           />
                         )}
                       </TableCell>
@@ -3039,7 +3676,7 @@ export function TransactionsPage({
           <div className="w-full max-w-md border bg-card p-4">
             <h3 className="text-sm font-semibold">Set Waive Account</h3>
             <p className="mt-1 text-xs text-muted-foreground">
-              Select which account will reimburse this expense.
+              Select which account will reimburse {waiveDialogRecords.length === 1 ? "this expense" : `${waiveDialogRecords.length} expenses`}.
             </p>
             <div className="mt-3">
               <AccountCombobox
@@ -3056,11 +3693,7 @@ export function TransactionsPage({
                 size="sm"
                 className="h-8 rounded-none px-2 text-xs"
                 disabled={waiveDialogSaving}
-                onClick={() => {
-                  setWaiveDialogOpen(false)
-                  setWaiveDialogRecord(null)
-                  setWaiveDialogAccountId("")
-                }}
+                onClick={closeWaiveDialog}
               >
                 Cancel
               </Button>
@@ -3070,7 +3703,7 @@ export function TransactionsPage({
                 size="sm"
                 className="h-8 rounded-none px-2 text-xs"
                 disabled={waiveDialogSaving}
-                onClick={() => void applyWaiveAccount(waiveDialogRecord, "")}
+                onClick={() => void applyWaiveAccount(waiveDialogRecords, "")}
               >
                 Clear
               </Button>
@@ -3079,7 +3712,7 @@ export function TransactionsPage({
                 size="sm"
                 className="h-8 rounded-none px-2 text-xs"
                 disabled={waiveDialogSaving}
-                onClick={() => void applyWaiveAccount(waiveDialogRecord, waiveDialogAccountId)}
+                onClick={() => void applyWaiveAccount(waiveDialogRecords, waiveDialogAccountId)}
               >
                 {waiveDialogSaving ? "Saving..." : "Save"}
               </Button>

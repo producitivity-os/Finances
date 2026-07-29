@@ -18,6 +18,26 @@ export type AccountApi = {
 
 export type Category = string
 
+export type BudgetPeriod = "weekly" | "monthly" | "yearly"
+
+export type Budget = {
+  id: string
+  category: Category
+  amount: string
+  currency: string
+  period: BudgetPeriod
+  createdAt: string
+}
+
+export type BudgetApi = {
+  id: string
+  category: Category
+  amount: string
+  currency: string
+  period: BudgetPeriod
+  created_at: string
+}
+
 export type RecordItem = {
   id: string
   date: string
@@ -33,6 +53,7 @@ export type RecordItem = {
   description: string
   category: Category
   flagged: boolean
+  archived: boolean
 }
 
 export type RecordApi = {
@@ -50,6 +71,7 @@ export type RecordApi = {
   description: string
   category: Category
   flagged: boolean
+  archived: boolean
 }
 
 export type ImportLedgerPayload = {
@@ -161,5 +183,15 @@ export const mapRecordFromApi = (row: RecordApi, accountList: Account[]): Record
     description: row.description,
     category: row.category,
     flagged: row.flagged,
+    archived: row.archived,
   }
 }
+
+export const mapBudgetFromApi = (row: BudgetApi): Budget => ({
+  id: row.id,
+  category: row.category,
+  amount: row.amount,
+  currency: row.currency,
+  period: row.period,
+  createdAt: row.created_at,
+})

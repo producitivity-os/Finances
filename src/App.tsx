@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type { DateRange } from "react-day-picker"
 import { invoke } from "@tauri-apps/api/core"
 import { getCurrentWindow } from "@tauri-apps/api/window"
+import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link"
 import { CommandIcon, UploadSimpleIcon } from "@phosphor-icons/react"
 import { toast } from "sonner"
 
@@ -29,10 +30,11 @@ import {
   SidebarProvider,
   SidebarTrigger,
 } from "@/components/ui/sidebar"
-import type { Account, AccountApi, CategoryDefinition, RecordApi, RecordItem, UploadedLedgerRow } from "@/lib/types"
-import { defaultCategories, mapAccountFromApi, mapRecordFromApi } from "@/lib/types"
+import type { Account, AccountApi, Budget, BudgetApi, CategoryDefinition, RecordApi, RecordItem, UploadedLedgerRow } from "@/lib/types"
+import { defaultCategories, mapAccountFromApi, mapBudgetFromApi, mapRecordFromApi } from "@/lib/types"
 import { buildNotifications } from "@/lib/notifications"
 import { AccountsPage } from "@/pages/AccountsPage"
+import { BudgetsPage } from "@/pages/BudgetsPage"
 import { CategoriesPage } from "@/pages/CategoriesPage"
 import { NotificationsPage } from "@/pages/NotificationsPage"
 import { LoansPage } from "@/pages/LoansPage"
@@ -263,6 +265,23 @@ type UserProfile = {
 
 const SESSION_STORAGE_KEY = "finance-session"
 
+const parseFinverseCallbackCode = (urlValue: string) => {
+  try {
+    const url = new URL(urlValue)
+    const isHttpCallback =
+      url.protocol.startsWith("http") && url.pathname === "/finverse/callback"
+    const isAppCallback =
+      url.protocol === "finances:" && url.hostname === "finverse" && url.pathname === "/callback"
+    return isHttpCallback || isAppCallback ? url.searchParams.get("code") : null
+  } catch {
+    return null
+  }
+}
+
+const readFinverseCallbackCode = () => {
+  return parseFinverseCallbackCode(window.location.href)
+}
+
 const readSession = (): Session | null => {
   try {
     const raw = localStorage.getItem(SESSION_STORAGE_KEY)
@@ -286,11 +305,17 @@ export function App() {
   const [profile, setProfile] = useState<UserProfile | null>(null)
   const [isLoggingIn, setIsLoggingIn] = useState(false)
   const [loginError, setLoginError] = useState<string | null>(null)
-  const [currentRoute, setCurrentRoute] = useState(() => window.location.hash || "#/transactions")
+  const [currentRoute, setCurrentRoute] = useState(() =>
+    readFinverseCallbackCode() ? "#/settings" : window.location.hash || "#/transactions"
+  )
+  const [finverseCallbackCode, setFinverseCallbackCode] = useState<string | null>(() =>
+    readFinverseCallbackCode()
+  )
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [commandOpen, setCommandOpen] = useState(false)
   const [accounts, setAccounts] = useState<Account[]>(initialAccounts)
   const [records, setRecords] = useState<RecordItem[]>([])
+  const [budgets, setBudgets] = useState<Budget[]>([])
   const [spreadsheetMode, setSpreadsheetMode] = useState(false)
   const [pageSize, setPageSize] = useState(15)
   const [runningBalanceAccountIds, setRunningBalanceAccountIds] = useState<Set<string>>(() => {
@@ -336,8 +361,8 @@ export function App() {
   const csvInputRef = useRef<HTMLInputElement | null>(null)
 
   const notifications = useMemo(
-    () => buildNotifications(records, readNotificationIds),
-    [readNotificationIds, records]
+    () => buildNotifications(records, budgets, readNotificationIds),
+    [budgets, readNotificationIds, records]
   )
   const unreadNotificationCount = notifications.filter((item) => !item.read).length
 
@@ -394,6 +419,7 @@ export function App() {
     saveSession(null)
     setProfile(null)
     setRecords([])
+    setBudgets([])
     setAccounts(initialAccounts)
     setCommandOpen(false)
   }, [saveSession])
@@ -454,10 +480,22 @@ export function App() {
     }
   }, [])
 
+  const loadBudgets = useCallback(async () => {
+    try {
+      const rows = await invoke<BudgetApi[]>("list_budgets")
+      const mapped = rows.map(mapBudgetFromApi)
+      setBudgets(mapped)
+      return mapped
+    } catch {
+      return []
+    }
+  }, [])
+
   const loadAppData = useCallback(async () => {
     const nextAccounts = await loadAccounts()
     await loadRecords(nextAccounts.length > 0 ? nextAccounts : initialAccounts)
-  }, [loadAccounts, loadRecords])
+    await loadBudgets()
+  }, [loadAccounts, loadBudgets, loadRecords])
 
   const reloadData = useCallback(async () => {
     if (!session) return
@@ -466,6 +504,12 @@ export function App() {
 
   useEffect(() => {
     if (!session) return
+    const callbackCode = readFinverseCallbackCode()
+    if (callbackCode) {
+      setFinverseCallbackCode(callbackCode)
+      window.history.replaceState(null, "", "/#/settings")
+      setCurrentRoute("#/settings")
+    }
     const syncRoute = () => {
       if (!window.location.hash) {
         window.location.hash = "/transactions"
@@ -476,6 +520,43 @@ export function App() {
     syncRoute()
     window.addEventListener("hashchange", syncRoute)
     return () => window.removeEventListener("hashchange", syncRoute)
+  }, [session])
+
+  useEffect(() => {
+    if (!session) return
+    const handleUrls = (urls: string[]) => {
+      const callbackCode = urls.map(parseFinverseCallbackCode).find(Boolean)
+      if (!callbackCode) return
+      setFinverseCallbackCode(callbackCode)
+      window.history.replaceState(null, "", "/#/settings")
+      setCurrentRoute("#/settings")
+      toast.success("Finverse redirected back to the app")
+    }
+
+    let cancelled = false
+    let unlisten: (() => void) | null = null
+
+    const setupDeepLinks = async () => {
+      try {
+        const currentUrls = await getCurrent()
+        if (!cancelled && currentUrls) handleUrls(currentUrls)
+      } catch {
+        // Deep links are only available inside the Tauri runtime.
+      }
+
+      try {
+        unlisten = await onOpenUrl((urls) => handleUrls(urls))
+      } catch {
+        // Ignore when the deep-link plugin is unavailable in a browser preview.
+      }
+    }
+
+    void setupDeepLinks()
+
+    return () => {
+      cancelled = true
+      unlisten?.()
+    }
   }, [session])
 
   useEffect(() => {
@@ -591,6 +672,8 @@ export function App() {
         ? "Payees"
       : currentRoute === "#/categories"
         ? "Categories"
+      : currentRoute === "#/budgets"
+        ? "Budgets"
         : currentRoute === "#/notifications"
           ? "Notifications"
         : currentRoute === "#/loans"
@@ -740,6 +823,13 @@ export function App() {
               records={records}
               setRecords={setRecords}
             />
+          ) : currentRoute === "#/budgets" ? (
+            <BudgetsPage
+              budgets={budgets}
+              setBudgets={setBudgets}
+              categories={categories}
+              records={records}
+            />
           ) : currentRoute === "#/settings" ? (
             <SettingsPage
               spreadsheetMode={spreadsheetMode}
@@ -753,6 +843,7 @@ export function App() {
               runningBalanceAccountIds={runningBalanceAccountIds}
               setRunningBalanceAccountIds={setRunningBalanceAccountIds}
               onDataRestored={reloadData}
+              finverseCallbackCode={finverseCallbackCode}
             />
           ) : currentRoute === "#/notifications" ? (
             <NotificationsPage

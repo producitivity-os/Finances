@@ -5,10 +5,12 @@ import {
   GalleryVerticalEnd,
   HandCoins,
   Handshake,
+  PiggyBank,
   Tag,
   User,
   Store,
   Repeat,
+  type LucideIcon,
 } from "lucide-react"
 
 import { NavMain } from "@/components/nav-main"
@@ -22,7 +24,21 @@ import {
   SidebarRail,
 } from "@/components/ui/sidebar"
 
-const data = {
+type MainNavItem = {
+  title: string
+  url: string
+  icon: LucideIcon
+  badge?: string
+}
+
+const data: {
+  teams: {
+    name: string
+    logo: LucideIcon
+    plan: string
+  }[]
+  navMain: MainNavItem[]
+} = {
   teams: [
     {
       name: "Finances",
@@ -60,6 +76,11 @@ const data = {
       title: "Categories",
       url: "#/categories",
       icon: Tag,
+    },
+    {
+      title: "Budgets",
+      url: "#/budgets",
+      icon: PiggyBank,
     },
     {
       title: "Loans",
