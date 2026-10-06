@@ -1,0 +1,78 @@
+name: Finances
+
+options:
+  bundleIdPrefix: com.productivitysuite
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+
+targets:
+  Finances:
+    type: application
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: Sources/Finances
+        excludes: [Resources]
+    resources:
+      - path: Sources/Finances/Resources
+    dependencies:
+      - sdk: Charts.framework
+      - sdk: PDFKit.framework
+      - sdk: Vision.framework
+    entitlements:
+      path: Sources/Finances/Finances.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.files.user-selected.read-only: true
+    info:
+      path: Sources/Finances/Info.plist
+      properties:
+        CFBundleDisplayName: Finances
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        LSApplicationCategoryType: public.app-category.finance
+        LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
+        NSHighResolutionCapable: true
+        NSPrincipalClass: NSApplication
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.productivitysuite.finances
+        PRODUCT_NAME: Finances
+        CODE_SIGN_STYLE: Automatic
+        ENABLE_APP_SANDBOX: YES
+        ENABLE_HARDENED_RUNTIME: YES
+
+  FinancesTests:
+    type: bundle.unit-test
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: Tests/FinancesTests
+    dependencies:
+      - target: Finances
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.productivitysuite.finances.tests
+        GENERATE_INFOPLIST_FILE: YES
+
+schemes:
+  Finances:
+    shared: true
+    build:
+      targets:
+        Finances: all
+        FinancesTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets: [FinancesTests]
+    archive:
+      config: Release
+

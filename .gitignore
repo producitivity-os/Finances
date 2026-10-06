@@ -1,0 +1,6 @@
+.build/
+Finances.xcodeproj/
+xcuserdata/
+*.xcuserstate
+.DS_Store
+
