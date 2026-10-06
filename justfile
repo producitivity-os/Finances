@@ -27,3 +27,11 @@ release: generate
 icons:
     zsh Tools/fetch-lucide-icons.sh
 
+
+update-icon picture:
+    zsh Tools/update-app-icon.sh "{{picture}}"
+
+install: release
+    mkdir -p ~/Applications
+    rm -rf ~/Applications/Notes.app
+    cp -R .build/xcode/Build/Products/Release/Notes.app ~/Applications/Notes.app
