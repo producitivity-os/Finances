@@ -4,6 +4,7 @@ options:
   bundleIdPrefix: com.productivitysuite
   deploymentTarget:
     macOS: "14.0"
+    iOS: "17.0"
   createIntermediateGroups: true
 
 settings:
@@ -11,27 +12,39 @@ settings:
     SWIFT_VERSION: "6.0"
     MACOSX_DEPLOYMENT_TARGET: "14.0"
 
+packages:
+  ProductivityUI:
+    path: ../../packages/ProductivityUI
+  ProductivityRoutineKit:
+    path: ../../packages/ProductivityRoutineKit
+  ProductivityCloudKit:
+    path: ../../packages/ProductivityCloudKit
+
 targets:
   Finances:
     type: application
     platform: macOS
     deploymentTarget: "14.0"
     sources:
-      - path: Sources/Finances
-        excludes: [Resources]
-    resources:
-      - path: Sources/Finances/Resources
+      - path: Sources/Shared
+      - path: Sources/macOS
+      - path: Resources/Assets.xcassets
+        buildPhase: resources
     dependencies:
+      - package: ProductivityUI
+      - package: ProductivityRoutineKit
+      - package: ProductivityCloudKit
       - sdk: Charts.framework
+      - sdk: CloudKit.framework
       - sdk: PDFKit.framework
       - sdk: Vision.framework
     entitlements:
-      path: Sources/Finances/Finances.entitlements
+      path: Sources/macOS/Platform/Finances.entitlements
       properties:
         com.apple.security.app-sandbox: true
         com.apple.security.files.user-selected.read-only: true
     info:
-      path: Sources/Finances/Info.plist
+      path: Sources/macOS/Platform/Info.plist
       properties:
         CFBundleDisplayName: Finances
         CFBundleShortVersionString: "1.0"
@@ -47,19 +60,71 @@ targets:
         CODE_SIGN_STYLE: Automatic
         ENABLE_APP_SANDBOX: YES
         ENABLE_HARDENED_RUNTIME: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
 
   FinancesTests:
     type: bundle.unit-test
     platform: macOS
     deploymentTarget: "14.0"
     sources:
-      - path: Tests/FinancesTests
+      - path: Tests/SharedTests
+      - path: Tests/macOSTests
     dependencies:
       - target: Finances
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.productivitysuite.finances.tests
         GENERATE_INFOPLIST_FILE: YES
+
+  FinancesIOS:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: Sources/Shared
+      - path: Sources/iOS
+      - path: Resources/Assets.xcassets
+        buildPhase: resources
+    dependencies:
+      - package: ProductivityUI
+      - package: ProductivityRoutineKit
+      - package: ProductivityCloudKit
+      - sdk: Charts.framework
+      - sdk: CloudKit.framework
+      - sdk: PDFKit.framework
+      - sdk: Vision.framework
+      - sdk: VisionKit.framework
+    entitlements:
+      path: Sources/iOS/Platform/FinancesIOS.entitlements
+    info:
+      path: Sources/iOS/Platform/Info.plist
+      properties:
+        CFBundleDisplayName: Finances
+        NSCameraUsageDescription: Finances uses the camera to scan receipts and bank statements.
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.productivitysuite.finances.ios
+        PRODUCT_NAME: Finances
+        PRODUCT_MODULE_NAME: FinancesIOS
+        CODE_SIGN_STYLE: Automatic
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        TARGETED_DEVICE_FAMILY: "1,2"
+
+  FinancesIOSTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: Tests/SharedTests
+      - path: Tests/iOSTests
+    dependencies:
+      - target: FinancesIOS
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.productivitysuite.finances.ios.tests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/Finances.app/Finances
+        BUNDLE_LOADER: $(TEST_HOST)
 
 schemes:
   Finances:
@@ -75,4 +140,16 @@ schemes:
       targets: [FinancesTests]
     archive:
       config: Release
-
+  FinancesIOS:
+    shared: true
+    build:
+      targets:
+        FinancesIOS: all
+        FinancesIOSTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets: [FinancesIOSTests]
+    archive:
+      config: Release
