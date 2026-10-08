@@ -1,5 +1,6 @@
 import SwiftData
 import SwiftUI
+import ProductivityUI
 
 private enum ChartRange: String, CaseIterable, Identifiable {
     case week = "7D", month = "30D", quarter = "90D", year = "1Y", all = "All"
@@ -8,11 +9,13 @@ private enum ChartRange: String, CaseIterable, Identifiable {
 }
 
 struct FinanceDashboardView: View {
+    @Environment(\.openWindow) private var openWindow
     @Query(sort: [SortDescriptor(\FinanceAccount.name)]) private var accounts: [FinanceAccount]
     @Query(sort: [SortDescriptor(\FinancialTransaction.occurredAt, order: .reverse)]) private var transactions: [FinancialTransaction]
     @Query private var preferences: [FinancePreferences]
     @State private var accountID: UUID?
     @State private var range = ChartRange.month
+    @State private var expenditureRange = ChartDateRange.week
 
     private var activeAccounts: [FinanceAccount] { accounts.filter { $0.archivedAt == nil } }
     private var currency: String { accountID.flatMap { id in activeAccounts.first { $0.id == id }?.currencyCode } ?? preferences.first?.baseCurrencyCode ?? "USD" }
@@ -55,8 +58,27 @@ struct FinanceDashboardView: View {
                     }
                     BalanceChartView(points: points, currencyCode: currency).frame(height: 285)
                 }.padding(16).background(.background, in: RoundedRectangle(cornerRadius: 14)).overlay { RoundedRectangle(cornerRadius: 14).stroke(.separator) }
+                HStack(alignment: .top, spacing: 14) {
+                    ProductivitySectionCard("Expenditure") {
+                        HStack { Spacer(); SwipeableSegmentPill(items: ChartDateRange.allCases, selection: $expenditureRange) { $0.rawValue } }
+                        DynamicRangeBarChart(data: expenditureData, range: expenditureRange, barsColor: .red).frame(height: 190)
+                    }
+                    SavingsSourcesPieChart(savingsSources: accountSources, currencyCode: currency, title: "Account balances")
+                        .frame(maxWidth: 370)
+                }
                 recent
             }.padding(20)
+        }
+        .overlay(alignment: .bottomTrailing) {
+            MorphingActionMenu(actions: [
+                .init(id: "transaction", icon: "arrow.left.arrow.right", title: "New Transaction"),
+                .init(id: "account", icon: "wallet.bifold", title: "New Account")
+            ]) { item in
+                switch item.id {
+                case "account": openWindow(value: FinanceEditorRoute.account(UUID()))
+                default: openWindow(value: FinanceEditorRoute.transaction(UUID()))
+                }
+            }.padding(18)
         }
     }
 
@@ -85,6 +107,30 @@ struct FinanceDashboardView: View {
                     Spacer()
                     Text(FinanceFormat.currency(minor: signedAmount, code: transaction.currencyCode)).foregroundStyle(isOutbound ? Color.primary : Color.green)
                 }.padding(.vertical, 3)
+            }
+        }
+    }
+
+    private var expenditureData: [DynamicBarChartData] {
+        let calendar = Calendar.current
+        let (start, monthly): (Date, Bool) = switch expenditureRange {
+        case .week: (calendar.date(byAdding: .day, value: -6, to: calendar.startOfDay(for: .now)) ?? .now, false)
+        case .halfYear: (calendar.date(byAdding: .month, value: -5, to: .now) ?? .now, true)
+        case .year: (calendar.date(byAdding: .month, value: -11, to: .now) ?? .now, true)
+        }
+        return FinanceDashboardMetrics.expenditure(transactions: transactions, start: start, monthly: monthly)
+            .map { DynamicBarChartData(date: $0.date, value: $0.value) }
+    }
+
+    private var accountSources: [SavingsSources] {
+        activeAccounts.compactMap { account in
+            let balance = Double(FinanceCalculator.accountBalance(account)) / 100
+            let converted: Double?
+            if account.currencyCode == currency { converted = balance }
+            else if let rate = account.baseExchangeRate { converted = balance * rate }
+            else { converted = nil }
+            return converted.map {
+                SavingsSources(title: account.name, description: account.type.title, amount: max(0, $0), color: Color(productivityHex: account.colorHex))
             }
         }
     }

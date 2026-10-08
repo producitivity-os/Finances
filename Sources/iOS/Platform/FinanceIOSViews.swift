@@ -7,6 +7,8 @@ import UniformTypeIdentifiers
 struct FinanceIOSDashboardView: View {
     @Query private var accounts: [FinanceAccount]
     @Query(sort: [SortDescriptor(\FinancialTransaction.occurredAt, order: .reverse)]) private var transactions: [FinancialTransaction]
+    @State private var transactionEditor = false
+    @State private var accountEditor = false
 
     private var activeAccounts: [FinanceAccount] { accounts.filter { $0.archivedAt == nil } }
     private var recent: [FinancialTransaction] { Array(transactions.filter { $0.archivedAt == nil }.prefix(6)) }
@@ -37,10 +39,41 @@ struct FinanceIOSDashboardView: View {
                         }
                     }
                 }
+                ProductivitySectionCard("Expenditure") {
+                    DynamicRangeBarChart(data: expenditure, range: .week, barsColor: .red).frame(height: 180)
+                }
+                SavingsSourcesPieChart(savingsSources: accountSources, currencyCode: activeAccounts.first?.currencyCode ?? "USD", title: "Account balances")
             }
             .padding()
         }
         .navigationTitle("Dashboard")
+        .overlay(alignment: .bottomTrailing) {
+            MorphingActionMenu(actions: [
+                .init(id: "transaction", icon: "arrow.left.arrow.right", title: "New Transaction"),
+                .init(id: "account", icon: "wallet.bifold", title: "New Account")
+            ]) { item in
+                if item.id == "account" { accountEditor = true } else { transactionEditor = true }
+            }.padding()
+        }
+        .sheet(isPresented: $transactionEditor) { NavigationStack { FinanceIOSTransactionEditor(transactionID: nil) } }
+        .sheet(isPresented: $accountEditor) { NavigationStack { FinanceIOSAccountEditor(accountID: nil) } }
+    }
+
+    private var expenditure: [DynamicBarChartData] {
+        let start = Calendar.current.date(byAdding: .day, value: -6, to: Calendar.current.startOfDay(for: .now)) ?? .now
+        return FinanceDashboardMetrics.expenditure(transactions: transactions, start: start, monthly: false)
+            .map { DynamicBarChartData(date: $0.date, value: $0.value) }
+    }
+
+    private var accountSources: [SavingsSources] {
+        activeAccounts.map {
+            SavingsSources(
+                title: $0.name,
+                description: $0.type.title,
+                amount: max(0, Double(FinanceCalculator.accountBalance($0)) / 100),
+                color: Color(productivityHex: $0.colorHex)
+            )
+        }
     }
 }
 
