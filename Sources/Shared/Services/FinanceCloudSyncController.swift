@@ -11,6 +11,10 @@ final class FinanceCloudSyncController {
     init(store: FinanceStoreActor) { self.store = store }
 
     func synchronize() async {
+        guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else {
+            status = "Local only"
+            return
+        }
         guard ProductivityCloudSyncEngine.isCloudKitAvailable else {
             status = "Local only"
             return

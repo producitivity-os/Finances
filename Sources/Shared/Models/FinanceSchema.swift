@@ -12,6 +12,27 @@ enum FinanceTransactionType: String, Codable, CaseIterable, Identifiable, Sendab
     var id: String { rawValue }
     var title: String { rawValue.capitalized }
 
+    var direction: MoneyDirection {
+        switch self {
+        case .refund, .deposit, .income: .inbound
+        case .transfer: .transfer
+        case .expense, .withdrawal, .fee, .loan: .outbound
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .expense: "cart"
+        case .refund: "arrow.uturn.backward"
+        case .deposit: "arrow.down.to.line"
+        case .income: "banknote"
+        case .transfer: "arrow.left.arrow.right"
+        case .withdrawal: "arrow.up.from.line"
+        case .fee: "receipt"
+        case .loan: "building.columns"
+        }
+    }
+
     static func allowed(for direction: MoneyDirection) -> [Self] {
         switch direction {
         case .inbound: [.refund, .deposit, .income, .loan]
@@ -25,6 +46,18 @@ enum FinanceAccountType: String, Codable, CaseIterable, Identifiable, Sendable {
     case bank, cash, credit, loan, investment, eWallet, other
     var id: String { rawValue }
     var title: String { self == .eWallet ? "E-Wallet" : rawValue.capitalized }
+
+    var systemImage: String {
+        switch self {
+        case .bank: "building.columns"
+        case .cash: "banknote"
+        case .credit: "creditcard"
+        case .loan: "hand.raised"
+        case .investment: "chart.line.uptrend.xyaxis"
+        case .eWallet: "wallet.bifold"
+        case .other: "tray.full"
+        }
+    }
 }
 
 enum PostingRole: String, Codable, CaseIterable, Identifiable, Sendable {
@@ -132,6 +165,10 @@ final class FinancialTransaction {
     var type: FinanceTransactionType {
         get { FinanceTransactionType(rawValue: typeRaw) ?? .expense }
         set { typeRaw = newValue.rawValue }
+    }
+    var recipient: String {
+        postings.first(where: { $0.role == .external && !$0.counterparty.isEmpty })?.counterparty
+            ?? transactionDetail
     }
 
     init(id: UUID = UUID(), occurredAt: Date = .now, detail: String, notes: String = "", direction: MoneyDirection, type: FinanceTransactionType, amountMinor: Int64, currencyCode: String, category: FinanceCategory? = nil) {

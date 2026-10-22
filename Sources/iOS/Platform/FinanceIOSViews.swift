@@ -86,7 +86,9 @@ struct FinanceIOSTransactionsView: View {
 
     private var visible: [FinancialTransaction] {
         transactions.filter {
-            $0.archivedAt == nil && (search.isEmpty || $0.transactionDetail.localizedCaseInsensitiveContains(search))
+            $0.archivedAt == nil && (search.isEmpty
+                || $0.recipient.localizedCaseInsensitiveContains(search)
+                || $0.transactionDetail.localizedCaseInsensitiveContains(search))
         }
     }
 
@@ -133,8 +135,8 @@ struct FinanceIOSTransactionRow: View {
                 .frame(width: 32, height: 32)
                 .background(.quaternary, in: Circle())
             VStack(alignment: .leading, spacing: 2) {
-                Text(transaction.transactionDetail).font(.headline)
-                Text("\(transaction.type.title) · \(transaction.occurredAt.formatted(date: .abbreviated, time: .omitted))")
+                Text(transaction.recipient).font(.headline)
+                Text("\(transaction.transactionDetail) · \(transaction.type.title) · \(transaction.occurredAt.formatted(date: .abbreviated, time: .omitted))")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
@@ -149,6 +151,8 @@ struct FinanceIOSTransactionRow: View {
 
 struct FinanceIOSTransactionEditor: View {
     let transactionID: UUID?
+    var onSaved: () -> Void = {}
+    var onCancelled: () -> Void = {}
     @Environment(FinancesAppController.self) private var controller
     @Environment(\.dismiss) private var dismiss
     @Query(sort: [SortDescriptor(\FinanceAccount.name)]) private var accounts: [FinanceAccount]
@@ -160,6 +164,12 @@ struct FinanceIOSTransactionEditor: View {
     @State private var error: String?
 
     private var activeAccounts: [FinanceAccount] { accounts.filter { $0.archivedAt == nil } }
+    private var recipientMatches: [String] {
+        let recipients = Array(Set(transactions.filter { $0.archivedAt == nil }.map(\.recipient))).filter { !$0.isEmpty }
+        let query = draft.recipient.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return recipients.sorted() }
+        return recipients.filter { $0.localizedCaseInsensitiveContains(query) }.sorted()
+    }
 
     var body: some View {
         Form {
@@ -171,7 +181,20 @@ struct FinanceIOSTransactionEditor: View {
                 ForEach(FinanceTransactionType.allowed(for: draft.direction)) { Text($0.title).tag($0) }
             }
             DatePicker("Date", selection: $draft.occurredAt, displayedComponents: [.date])
-            TextField("Banking detail", text: $draft.detail)
+            Section("Recipient") {
+                TextField("Search or enter recipient", text: $draft.recipient)
+                if !recipientMatches.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack {
+                            ForEach(recipientMatches, id: \.self) { recipient in
+                                Button(recipient) { draft.recipient = recipient }
+                                    .buttonStyle(.bordered)
+                            }
+                        }
+                    }
+                }
+            }
+            TextField("Transaction detail", text: $draft.detail)
             TextField("Amount", value: $draft.amount, format: .number)
                 .keyboardType(.decimalPad)
             TextField("Currency", text: $draft.currencyCode)
@@ -197,7 +220,7 @@ struct FinanceIOSTransactionEditor: View {
         .navigationTitle(transactionID == nil ? "New Transaction" : "Edit Transaction")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+            ToolbarItem(placement: .cancellationAction) { Button("Cancel") { onCancelled(); dismiss() } }
             ToolbarItem(placement: .confirmationAction) { Button("Save") { save() }.disabled(!canSave) }
         }
         .onAppear { load() }
@@ -212,6 +235,7 @@ struct FinanceIOSTransactionEditor: View {
     }
 
     private var canSave: Bool {
+        !draft.recipient.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
         !draft.detail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
         draft.amount > 0 &&
         (draft.direction == .inbound || fromAccountID != nil) &&
@@ -223,6 +247,7 @@ struct FinanceIOSTransactionEditor: View {
         draft = TransactionDraft(
             id: transaction.id,
             occurredAt: transaction.occurredAt,
+            recipient: transaction.recipient,
             detail: transaction.transactionDetail,
             notes: transaction.notes,
             direction: transaction.direction,
@@ -247,6 +272,7 @@ struct FinanceIOSTransactionEditor: View {
             do {
                 _ = try await controller.store.saveTransaction(draft)
                 await controller.cloud.synchronize()
+                onSaved()
                 dismiss()
             } catch {
                 self.error = error.localizedDescription
@@ -474,6 +500,7 @@ struct FinanceIOSMoreView: View {
 struct FinanceIOSCategoriesView: View {
     @Environment(\.modelContext) private var context
     @Query(sort: [SortDescriptor(\FinanceCategory.name)]) private var categories: [FinanceCategory]
+    @Query private var transactions: [FinancialTransaction]
     @State private var name = ""
 
     var body: some View {
@@ -483,8 +510,21 @@ struct FinanceIOSCategoriesView: View {
             }
             Section("Categories") {
                 ForEach(categories.filter { $0.archivedAt == nil }) { category in
-                    Label(category.name, systemImage: category.iconName)
-                        .contextMenu { Button("Archive", role: .destructive) { category.archivedAt = .now; try? context.save() } }
+                    Label(category.name, systemImage: categorySystemImage(category.iconName))
+                        .swipeActions {
+                            if !FinanceCategoryService.isUncategorized(category) {
+                                Button(role: .destructive) { delete(category) } label: {
+                                    Label("Delete", systemImage: "trash")
+                                        .labelStyle(.iconOnly)
+                                        .frame(width: 24, height: 24, alignment: .center)
+                                }
+                            }
+                        }
+                        .contextMenu {
+                            if !FinanceCategoryService.isUncategorized(category) {
+                                Button("Delete", role: .destructive) { delete(category) }
+                            }
+                        }
                 }
             }
         }
@@ -495,6 +535,24 @@ struct FinanceIOSCategoriesView: View {
         context.insert(FinanceCategory(name: name.trimmingCharacters(in: .whitespaces), iconName: "tag", colorHex: "#2F80ED"))
         try? context.save()
         name = ""
+    }
+
+    private func delete(_ category: FinanceCategory) {
+        try? FinanceCategoryService.delete(category, categories: categories, transactions: transactions, in: context)
+    }
+
+    private func categorySystemImage(_ storedName: String) -> String {
+        if storedName.hasPrefix("sf:") { return String(storedName.dropFirst(3)) }
+        return switch storedName {
+        case "dumbbell": "figure.strengthtraining.traditional"
+        case "utensils": "fork.knife"
+        case "shopping-cart": "cart"
+        case "car": "car.fill"
+        case "house": "house.fill"
+        case "heart-pulse": "heart.text.square"
+        case "briefcase-business": "briefcase.fill"
+        default: storedName.contains("-") ? "tag" : storedName
+        }
     }
 }
 

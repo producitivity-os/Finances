@@ -5,27 +5,68 @@ struct CategoriesView: View {
     @Environment(\.modelContext) private var context
     @Environment(\.openWindow) private var openWindow
     @Query(sort: [SortDescriptor(\FinanceCategory.name)]) private var categories: [FinanceCategory]
-    @State private var showArchived = false
+    @Query private var transactions: [FinancialTransaction]
 
-    private var visible: [FinanceCategory] { categories.filter { showArchived || $0.archivedAt == nil } }
+    private var visible: [FinanceCategory] { categories.filter { $0.archivedAt == nil } }
 
     var body: some View {
-        VStack(spacing: 0) {
-            FinancePageHeader(eyebrow: "Organize spending", title: "Categories", actionTitle: "Add Category") { openWindow(value: FinanceEditorRoute.category(UUID())) }.padding(20)
-            List(visible) { category in
-                HStack {
-                    Circle().fill(Color(hex: category.colorHex)).frame(width: 12, height: 12)
-                    Text(category.name)
-                    Spacer()
-                    if category.isBuiltin { Text("Built-in").font(.caption).foregroundStyle(.secondary) }
-                    if category.archivedAt != nil { Text("Archived").font(.caption).foregroundStyle(.orange) }
-                }.contentShape(Rectangle()).onTapGesture(count: 2) { openWindow(value: FinanceEditorRoute.category(category.id)) }
-                .contextMenu {
-                    Button("Edit") { openWindow(value: FinanceEditorRoute.category(category.id)) }
-                    Button(category.archivedAt == nil ? "Archive" : "Restore") { category.archivedAt = category.archivedAt == nil ? .now : nil; try? context.save() }
+        List(visible) { category in
+            HStack {
+                FinanceIconView(name: category.iconName, size: 17)
+                    .foregroundStyle(Color(hex: category.colorHex))
+                    .frame(width: 28, height: 28)
+                    .background(Color(hex: category.colorHex).opacity(0.12), in: RoundedRectangle(cornerRadius: 7))
+                Text(category.name)
+                Spacer()
+            }
+            .contentShape(Rectangle())
+            .onTapGesture(count: 2) { edit(category) }
+            .swipeActions(edge: .leading, allowsFullSwipe: false) {
+                Button { edit(category) } label: {
+                    Label("Edit", systemImage: "pencil")
+                        .labelStyle(.iconOnly)
+                        .frame(width: 24, height: 24, alignment: .center)
+                }
+                .tint(FinanceTheme.accent)
+            }
+            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                if !FinanceCategoryService.isUncategorized(category) {
+                    Button(role: .destructive) { delete(category) } label: {
+                        Label("Delete", systemImage: "trash")
+                            .labelStyle(.iconOnly)
+                            .frame(width: 24, height: 24, alignment: .center)
+                    }
                 }
             }
-        }.toolbar { Toggle("Show Archived", isOn: $showArchived) }
+            .contextMenu {
+                Button("Edit") { edit(category) }
+                if !FinanceCategoryService.isUncategorized(category) {
+                    Button("Delete", role: .destructive) { delete(category) }
+                }
+            }
+        }
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button { openWindow(value: FinanceEditorRoute.category(UUID())) } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 15, weight: .semibold))
+                        .frame(width: 32, height: 32)
+                        .background(.ultraThinMaterial, in: Circle())
+                        .overlay { Circle().stroke(.secondary.opacity(0.18)) }
+                }
+                .buttonStyle(.plain)
+                .help("New Category")
+                .accessibilityLabel("New Category")
+            }
+        }
+    }
+
+    private func edit(_ category: FinanceCategory) {
+        openWindow(value: FinanceEditorRoute.category(category.id))
+    }
+
+    private func delete(_ category: FinanceCategory) {
+        try? FinanceCategoryService.delete(category, categories: categories, transactions: transactions, in: context)
     }
 }
 
@@ -42,19 +83,24 @@ struct CategoryEditorView: View {
     var body: some View {
         Form {
             TextField("Name", text: $name)
-            TextField("Lucide icon", text: $icon)
-            TextField("Color", text: $color)
-            HStack { Circle().fill(Color(hex: color)).frame(width: 18, height: 18); Text(name.isEmpty ? "Preview" : name) }
+            LabeledContent("Icon") { FinanceIconPicker(selection: $icon).frame(maxWidth: 260) }
+            LabeledContent("Color") { FinanceColorPicker(hex: $color).frame(maxWidth: 260) }
+            HStack(spacing: 10) {
+                FinanceIconView(name: icon, size: 18)
+                    .foregroundStyle(Color(hex: color))
+                    .frame(width: 32, height: 32)
+                    .background(Color(hex: color).opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+                Text(name.isEmpty ? "Preview" : name)
+            }
             HStack { Button("Cancel") { dismiss() }; Spacer(); Button("Save") { save() }.keyboardShortcut(.defaultAction).disabled(name.trimmingCharacters(in: .whitespaces).isEmpty) }
-        }.formStyle(.grouped).padding().frame(width: 450, height: 290).task { load() }
+        }.formStyle(.grouped).padding().frame(width: 480, height: 350).task { load() }
         .alert("Category could not be saved", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) { Button("OK") {} } message: { Text(error ?? "") }
     }
     private func load() { if let category = categories.first(where: { $0.id == id }) { name = category.name; icon = category.iconName; color = category.colorHex } }
     private func save() {
         let category = categories.first(where: { $0.id == id }) ?? FinanceCategory(id: id, name: name, iconName: icon, colorHex: color)
         if category.modelContext == nil { context.insert(category) }
-        category.name = name.trimmingCharacters(in: .whitespacesAndNewlines); category.iconName = icon; category.colorHex = color
+        category.name = name.trimmingCharacters(in: .whitespacesAndNewlines); category.iconName = icon; category.colorHex = FinanceIconCatalog.normalizedHex(color)
         do { try context.save(); dismiss() } catch { self.error = error.localizedDescription }
     }
 }
-

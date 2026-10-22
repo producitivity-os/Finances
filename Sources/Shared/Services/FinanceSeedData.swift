@@ -27,6 +27,7 @@ enum FinanceSeedData {
         .init(name: "Investments", icon: "chart-candlestick", color: "#2F80ED"),
         .init(name: "Loans", icon: "hand-coins", color: "#F2994A"),
         .init(name: "Transfers", icon: "arrow-left-right", color: "#56CCF2"),
+        .init(name: "Uncategorized", icon: "tag", color: "#828282"),
         .init(name: "Other", icon: "circle-dollar-sign", color: "#828282")
     ]
 }

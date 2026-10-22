@@ -1,8 +1,11 @@
+import AppKit
+import ProductivityRoutineKit
 import SwiftData
 import SwiftUI
 
 @main
 struct FinancesApp: App {
+    @NSApplicationDelegateAdaptor(RoutineDockMenuApplicationDelegate.self) private var appDelegate
     private let container: ModelContainer
     @State private var state: FinancesAppState
 
@@ -12,14 +15,24 @@ struct FinancesApp: App {
             let configuration = ModelConfiguration("Finances", schema: schema)
             let container = try ModelContainer(for: schema, migrationPlan: FinanceMigrationPlan.self, configurations: [configuration])
             self.container = container
-            _state = State(initialValue: FinancesAppState(container: container))
+            let state = FinancesAppState(container: container)
+            _state = State(initialValue: state)
+            RoutineDockMenuController.shared.configure(items: { state.dockMenuItems() }) { request in
+                Task {
+                    await state.handleRoutineAction(request)
+                    NSApp.activate(ignoringOtherApps: true)
+                }
+            }
         } catch { fatalError("Finances could not open its local store: \(error.localizedDescription)") }
     }
 
     var body: some Scene {
         WindowGroup {
             FinancesContentView().environment(state).modelContainer(container)
-        }.defaultSize(width: 840, height: 600)
+                .onOpenURL { url in Task { await state.handleRoutineInvocation(url) } }
+        }
+        .defaultSize(width: 840, height: 600)
+        .commands { FinancesCommands(state: state) }
 
         WindowGroup("Editor", for: FinanceEditorRoute.self) { route in
             if let route = route.wrappedValue {
@@ -28,6 +41,17 @@ struct FinancesApp: App {
         }.defaultSize(width: 700, height: 640)
 
         Settings { FinancesSettingsView().environment(state).modelContainer(container) }
+    }
+}
+
+private struct FinancesCommands: Commands {
+    let state: FinancesAppState
+
+    var body: some Commands {
+        CommandGroup(replacing: .newItem) {
+            Button(state.newItemCommandTitle) { state.requestNewItem() }
+                .keyboardShortcut("n", modifiers: .command)
+        }
     }
 }
 

@@ -32,13 +32,21 @@ enum FinanceCalculator {
 
     static func validate(_ draft: TransactionDraft) throws {
         if draft.detail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { throw FinanceValidationError.emptyDetail }
-        if minorUnits(draft.amount) <= 0 { throw FinanceValidationError.invalidAmount }
-        if !FinanceTransactionType.allowed(for: draft.direction).contains(draft.type) { throw FinanceValidationError.incompatibleType }
+        let amount = draft.items.isEmpty ? draft.amount : draft.items.reduce(Decimal.zero) { $0 + $1.amount }
+        if minorUnits(amount) <= 0 { throw FinanceValidationError.invalidAmount }
+        if draft.items.contains(where: { minorUnits($0.amount) <= 0 }) { throw FinanceValidationError.invalidAmount }
+
+        if draft.accountID != nil {
+            if draft.type.direction == .transfer && draft.destinationAccountID == nil { throw FinanceValidationError.missingDestination }
+            return
+        }
+
         let sources = draft.postings.filter { $0.role == .source && $0.accountID != nil }
         let destinations = draft.postings.filter { $0.role == .destination && $0.accountID != nil }
-        if draft.direction != .inbound && sources.isEmpty { throw FinanceValidationError.missingSource }
-        if draft.direction != .outbound && destinations.isEmpty { throw FinanceValidationError.missingDestination }
-        if draft.direction == .transfer {
+        let direction = draft.type.direction
+        if direction != .inbound && sources.isEmpty { throw FinanceValidationError.missingSource }
+        if direction == .inbound && destinations.isEmpty { throw FinanceValidationError.missingDestination }
+        if direction == .transfer {
             let source = sources.reduce(Int64(0)) { $0 + minorUnits($1.amount) }
             let destination = destinations.reduce(Int64(0)) { $0 + minorUnits($1.amount) }
             if source != destination { throw FinanceValidationError.unbalancedTransfer }
@@ -87,4 +95,3 @@ enum FinanceFormat {
         return value.formatted(.currency(code: code))
     }
 }
-

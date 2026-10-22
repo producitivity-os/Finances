@@ -12,6 +12,14 @@ actor FinanceStoreActor {
                 modelContext.insert(FinanceCategory(name: seed.name, iconName: seed.icon, colorHex: seed.color, isBuiltin: true))
             }
         }
+        if try modelContext.fetchCount(FetchDescriptor<FinanceAccount>()) == 0 {
+            modelContext.insert(FinanceAccount(
+                name: "Maybank",
+                type: .bank,
+                currencyCode: "MYR",
+                colorHex: "#FFCC00"
+            ))
+        }
         try modelContext.save()
     }
 
@@ -36,29 +44,50 @@ actor FinanceStoreActor {
 
     func saveTransaction(_ draft: TransactionDraft) throws -> UUID {
         try FinanceCalculator.validate(draft)
+        let direction = draft.type.direction
+        let amount = draft.items.isEmpty ? draft.amount : draft.items.reduce(Decimal.zero) { $0 + $1.amount }
+        let amountMinor = FinanceCalculator.minorUnits(amount)
         let transaction: FinancialTransaction
         if let id = draft.id, let existing = try modelContext.fetch(FetchDescriptor<FinancialTransaction>(predicate: #Predicate { $0.id == id })).first {
             transaction = existing
             existing.postings.forEach(modelContext.delete)
             existing.postings.removeAll()
         } else {
-            transaction = FinancialTransaction(detail: draft.detail, direction: draft.direction, type: draft.type, amountMinor: FinanceCalculator.minorUnits(draft.amount), currencyCode: draft.currencyCode)
+            transaction = FinancialTransaction(detail: draft.detail, direction: direction, type: draft.type, amountMinor: amountMinor, currencyCode: draft.currencyCode)
             modelContext.insert(transaction)
         }
         transaction.occurredAt = draft.occurredAt
         transaction.transactionDetail = draft.detail.trimmingCharacters(in: .whitespacesAndNewlines)
-        transaction.notes = draft.notes
-        transaction.direction = draft.direction
+        transaction.notes = TransactionLineItemCodec.encode(notes: draft.notes, items: draft.items)
+        transaction.direction = direction
         transaction.type = draft.type
-        transaction.amountMinor = FinanceCalculator.minorUnits(draft.amount)
+        transaction.amountMinor = amountMinor
         transaction.currencyCode = draft.currencyCode.uppercased()
         transaction.updatedAt = .now
         if let categoryID = draft.categoryID {
             transaction.category = try modelContext.fetch(FetchDescriptor<FinanceCategory>(predicate: #Predicate { $0.id == categoryID })).first
         } else { transaction.category = nil }
 
+        var rows = draft.postings
+        if let accountID = draft.accountID {
+            rows = [PostingDraft(
+                accountID: accountID,
+                role: direction == .inbound ? .destination : .source,
+                amount: amount,
+                accountAmount: amount
+            )]
+            if direction == .transfer, let destinationAccountID = draft.destinationAccountID {
+                rows.append(PostingDraft(
+                    accountID: destinationAccountID,
+                    role: .destination,
+                    amount: amount,
+                    accountAmount: amount
+                ))
+            }
+        }
+
         var signedTotal: Int64 = 0
-        for row in draft.postings where row.accountID != nil {
+        for row in rows where row.accountID != nil {
             guard let accountID = row.accountID,
                   let account = try modelContext.fetch(FetchDescriptor<FinanceAccount>(predicate: #Predicate { $0.id == accountID })).first else { continue }
             let transactionMinor = FinanceCalculator.minorUnits(row.amount)
@@ -69,7 +98,15 @@ actor FinanceStoreActor {
             signedTotal += sign * transactionMinor
         }
         if signedTotal != 0 {
-            transaction.postings.append(TransactionPosting(role: .external, transactionAmountMinor: -signedTotal, accountAmountMinor: -signedTotal, accountCurrencyCode: transaction.currencyCode, counterparty: transaction.transactionDetail, transaction: transaction))
+            let recipient = draft.recipient.trimmingCharacters(in: .whitespacesAndNewlines)
+            transaction.postings.append(TransactionPosting(
+                role: .external,
+                transactionAmountMinor: -signedTotal,
+                accountAmountMinor: -signedTotal,
+                accountCurrencyCode: transaction.currencyCode,
+                counterparty: recipient.isEmpty ? transaction.transactionDetail : recipient,
+                transaction: transaction
+            ))
         }
         try modelContext.save()
         return transaction.id

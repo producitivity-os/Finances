@@ -5,6 +5,7 @@ struct FinancesIOSRootView: View {
     @Environment(FinancesAppController.self) private var controller
 
     var body: some View {
+        @Bindable var controller = controller
         Group {
             if controller.isReady {
                 TabView {
@@ -30,5 +31,16 @@ struct FinancesIOSRootView: View {
             }
         }
         .task { await controller.prepare() }
+        .onOpenURL { url in Task { await controller.handleRoutineInvocation(url) } }
+        .sheet(isPresented: $controller.presentsRoutineTransaction) {
+            NavigationStack {
+                FinanceIOSTransactionEditor(
+                    transactionID: nil,
+                    onSaved: { controller.finishRoutineTransaction(completed: true) },
+                    onCancelled: { controller.finishRoutineTransaction(completed: false) }
+                )
+            }
+            .interactiveDismissDisabled()
+        }
     }
 }

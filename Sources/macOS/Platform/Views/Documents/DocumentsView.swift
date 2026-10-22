@@ -3,18 +3,22 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct DocumentsView: View {
+    @Environment(FinancesAppState.self) private var state
     @Environment(\.modelContext) private var context
     @Environment(\.openWindow) private var openWindow
     @Query(sort: [SortDescriptor(\FinanceDocument.createdAt, order: .reverse)]) private var documents: [FinanceDocument]
-    @State private var importing = false
     @State private var importKind = FinanceDocumentKind.receipt
+    @State private var isDropTargeted = false
     @State private var error: String?
 
     var body: some View {
         VStack(spacing: 0) {
-            FinancePageHeader(eyebrow: "Receipts and statements", title: "Documents").padding(20)
             if documents.filter({ $0.archivedAt == nil }).isEmpty {
-                EmptyFinanceView(icon: .fileText, title: "No documents", message: "Import a receipt or statement, then run on-device text recognition.")
+                EmptyFinanceView(
+                    icon: .fileText,
+                    title: isDropTargeted ? "Drop to import" : "No documents",
+                    message: "Drop receipt images or PDF statements here, or use Import in the toolbar."
+                )
             } else {
                 List(documents.filter { $0.archivedAt == nil }) { document in
                     HStack(spacing: 11) {
@@ -28,22 +32,64 @@ struct DocumentsView: View {
                 }
             }
         }
-        .toolbar {
-            Menu("Import") {
-                Button("Receipt") { importKind = .receipt; importing = true }
-                Button("Bank Statement") { importKind = .statement; importing = true }
+        .contentShape(Rectangle())
+        .overlay {
+            if isDropTargeted {
+                RoundedRectangle(cornerRadius: 18)
+                    .stroke(FinanceTheme.accent, style: StrokeStyle(lineWidth: 2, dash: [8, 6]))
+                    .padding(18)
+                    .allowsHitTesting(false)
             }
         }
-        .fileImporter(isPresented: $importing, allowedContentTypes: [.pdf, .image], allowsMultipleSelection: true) { result in
-            do {
-                for url in try result.get() {
-                    let access = url.startAccessingSecurityScopedResource(); defer { if access { url.stopAccessingSecurityScopedResource() } }
-                    let document = try DocumentService.importDocument(from: url, kind: importKind, context: context)
-                    openWindow(value: FinanceEditorRoute.document(document.id))
-                }
-            } catch { self.error = error.localizedDescription }
+        .dropDestination(for: URL.self) { urls, _ in
+            importDocuments(at: urls, kind: importKind)
+            return !urls.isEmpty
+        } isTargeted: { isDropTargeted = $0 }
+        .toolbar {
+            Menu("Import") {
+                Button("Receipt…") { presentImporter(for: .receipt) }
+                Button("Bank Statement…") { presentImporter(for: .statement) }
+            }
+        }
+        .onChange(of: state.createRequestID) { _, requestID in
+            guard requestID != nil, state.selection == .documents else { return }
+            presentImporter(for: .receipt)
         }
         .alert("Document could not be imported", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) { Button("OK") {} } message: { Text(error ?? "") }
+    }
+
+    private func presentImporter(for kind: FinanceDocumentKind) {
+        importKind = kind
+        let panel = NSOpenPanel()
+        panel.title = kind == .receipt ? "Import Receipt" : "Import Bank Statement"
+        panel.prompt = "Import"
+        panel.allowedContentTypes = [.pdf, .image]
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.begin { response in
+            guard response == .OK else { return }
+            importDocuments(at: panel.urls, kind: kind)
+        }
+    }
+
+    private func importDocuments(at urls: [URL], kind: FinanceDocumentKind) {
+        guard !urls.isEmpty else { return }
+        do {
+            var imported: [FinanceDocument] = []
+            for url in urls where url.isFileURL {
+                let type = UTType(filenameExtension: url.pathExtension)
+                guard type?.conforms(to: .pdf) == true || type?.conforms(to: .image) == true else { continue }
+                let access = url.startAccessingSecurityScopedResource()
+                defer { if access { url.stopAccessingSecurityScopedResource() } }
+                imported.append(try DocumentService.importDocument(from: url, kind: kind, context: context))
+            }
+            if let document = imported.first {
+                openWindow(value: FinanceEditorRoute.document(document.id))
+            }
+        } catch {
+            self.error = error.localizedDescription
+        }
     }
 }
 
@@ -161,14 +207,15 @@ private struct CandidateReviewView: View {
 
     init(candidate: OCRTransactionCandidate, document: FinanceDocument) {
         self.candidate = candidate; self.document = document
-        _draft = State(initialValue: TransactionDraft(occurredAt: candidate.occurredAt ?? .now, detail: candidate.transactionDetail, direction: candidate.direction, type: candidate.type, amount: FinanceCalculator.decimal(minor: candidate.amountMinor ?? 0), currencyCode: candidate.currencyCode))
+        _draft = State(initialValue: TransactionDraft(occurredAt: candidate.occurredAt ?? .now, detail: candidate.transactionDetail, direction: candidate.type.direction, type: candidate.type, amount: FinanceCalculator.decimal(minor: candidate.amountMinor ?? 0), currencyCode: candidate.currencyCode))
     }
 
     var body: some View {
         Form {
             if candidate.isLikelyDuplicate { Label("This may duplicate an existing transaction.", systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange) }
-            Picker("Direction", selection: $draft.direction) { ForEach(MoneyDirection.allCases) { Text($0.title).tag($0) } }
-            Picker("Type", selection: $draft.type) { ForEach(FinanceTransactionType.allowed(for: draft.direction)) { Text($0.title).tag($0) } }
+            Picker("Type", selection: $draft.type) {
+                ForEach(FinanceTransactionType.allCases) { Label($0.title, systemImage: $0.systemImage).tag($0) }
+            }
             DatePicker("Date", selection: $draft.occurredAt)
             TextField("Detail", text: $draft.detail)
             TextField("Amount", value: $draft.amount, format: .number)
@@ -176,14 +223,19 @@ private struct CandidateReviewView: View {
             Picker("Category", selection: $draft.categoryID) { Text("None").tag(UUID?.none); ForEach(categories.filter { $0.archivedAt == nil }) { Text($0.name).tag(Optional($0.id)) } }
             HStack { Button("Cancel") { dismiss() }; Spacer(); Button("Import") { importCandidate() }.keyboardShortcut(.defaultAction).disabled(accountID == nil || draft.amount <= 0) }
         }.formStyle(.grouped).padding().frame(width: 500, height: 430)
-        .onChange(of: draft.direction) { _, direction in if !FinanceTransactionType.allowed(for: direction).contains(draft.type) { draft.type = FinanceTransactionType.allowed(for: direction)[0] } }
+        .onAppear {
+            guard accountID == nil else { return }
+            let active = accounts.filter { $0.archivedAt == nil }
+            accountID = state.defaultAccountID.flatMap { id in active.first { $0.id == id }?.id }
+                ?? active.first { $0.name.localizedCaseInsensitiveContains("Maybank") }?.id
+                ?? active.first?.id
+        }
         .alert("Suggestion could not be imported", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) { Button("OK") {} } message: { Text(error ?? "") }
     }
 
     private func importCandidate() {
         guard let accountID else { return }
-        let role: PostingRole = draft.direction == .inbound ? .destination : .source
-        draft.postings = [PostingDraft(accountID: accountID, role: role, amount: draft.amount, accountAmount: draft.amount)]
+        draft.accountID = accountID
         Task {
             do {
                 let transactionID = try await state.store.saveTransaction(draft)

@@ -1,6 +1,10 @@
 import ProductivityUI
 import SwiftUI
 
+enum FinanceTheme {
+    static let accent = Color(red: 0.02, green: 0.62, blue: 0.34)
+}
+
 struct FinancePageHeader: View {
     let eyebrow: String
     let title: String

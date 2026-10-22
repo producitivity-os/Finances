@@ -28,17 +28,42 @@ struct BalanceChartView: View {
                 RuleMark(x: .value("Selected", selectedPoint.date)).foregroundStyle(.secondary.opacity(0.4))
                 PointMark(x: .value("Date", selectedPoint.date), y: .value("Balance", Double(selectedPoint.balanceMinor) / 100))
                     .foregroundStyle(selectedPoint.balanceMinor >= 0 ? .green : .red)
-                    .annotation(position: .top) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(selectedPoint.date, format: .dateTime.month(.abbreviated).day()).font(.caption)
-                            Text(FinanceFormat.currency(minor: selectedPoint.balanceMinor, code: currencyCode)).font(.caption.bold())
-                        }.padding(7).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 7))
-                    }
             }
         }
         .chartXAxis { AxisMarks(values: .automatic(desiredCount: 5)) }
         .chartYAxis { AxisMarks(position: .leading) }
         .chartXSelection(value: $selectedDate)
+        .chartOverlay { proxy in
+            GeometryReader { geometry in
+                if let selectedPoint,
+                   let plotAnchor = proxy.plotFrame,
+                   let x = proxy.position(forX: selectedPoint.date),
+                   let y = proxy.position(forY: Double(selectedPoint.balanceMinor) / 100) {
+                    let plot = geometry[plotAnchor]
+                    let tooltipWidth: CGFloat = 132
+                    let tooltipHeight: CGFloat = 58
+                    let proposedY = plot.minY + y - tooltipHeight / 2 - 16
+                    let tooltipY = proposedY < plot.minY
+                        ? min(plot.maxY - tooltipHeight / 2, plot.minY + y + tooltipHeight / 2 + 16)
+                        : proposedY
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(selectedPoint.date, format: .dateTime.month(.abbreviated).day())
+                            .font(.caption)
+                        Text(FinanceFormat.currency(minor: selectedPoint.balanceMinor, code: currencyCode))
+                            .font(.caption.bold())
+                    }
+                    .padding(7)
+                    .frame(width: tooltipWidth, alignment: .leading)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 7))
+                    .position(
+                        x: min(plot.maxX - tooltipWidth / 2, max(plot.minX + tooltipWidth / 2, plot.minX + x)),
+                        y: tooltipY
+                    )
+                    .allowsHitTesting(false)
+                }
+            }
+        }
     }
 }
 
